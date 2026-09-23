@@ -1,0 +1,12 @@
+{
+  "method": "cone-geometry",
+  "sampling_seed": 6370,
+  "samples": 3,
+  "row_meanings": [
+    "target displacement",
+    "bias",
+    "displacement after the step"
+  ],
+  "interpretation": "A deterministic geometry calculation; these rows are not random samples.",
+  "finite_values": true
+}

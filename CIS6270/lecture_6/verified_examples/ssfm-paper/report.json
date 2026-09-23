@@ -1,0 +1,21 @@
+{
+  "method": "ssfm",
+  "data_kind": "ornstein-uhlenbeck",
+  "train_loss_first_20_mean": 0.5530126631259918,
+  "train_loss_last_20_mean": 2.3421594560146333,
+  "training_steps": 2000,
+  "python": "3.12.14",
+  "torch": "2.9.1+cpu",
+  "sample_steps": 8,
+  "samples": 128,
+  "sampling_seed": 6370,
+  "same_noise_reference_rmse": 3.8469111919403076,
+  "direct_vs_split_rmse": 18.642148971557617,
+  "one_step_reference_rmse": 22.396263122558594,
+  "reference_em_steps": 512,
+  "sample_variance": 18.699464797973633,
+  "exact_terminal_variance": 0.34717813884364257,
+  "reference_note": "Same Brownian increments; EM reference retains finite discretization error.",
+  "finite_samples": true,
+  "elapsed_seconds": 7.400261947994295
+}

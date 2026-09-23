@@ -1,0 +1,25 @@
+# Local Python environments and caches.
+.venv*/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+.esm2_cache/
+
+# Generated results and downloaded/trained weights.
+outputs/
+esm2_flow_outputs/
+esm2_diffusion_outputs/
+*.pt
+*.pth
+*.safetensors
+
+# Local secrets must never be committed.
+.env
+.env.*
+
+# Lecture 2 downloads and newly generated results.
+data/
+flow_matching_outputs/
+!lecture_2/flow_unet_mnist.pt

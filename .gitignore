@@ -3,7 +3,11 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.venv*/
 venv/
+
+# Nested git metadata accidentally left after flattening
+.git.upstream-hf/
 
 # Jupyter
 .ipynb_checkpoints/

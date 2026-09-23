@@ -1,0 +1,14 @@
+{
+  "metrics": {
+    "valid_dna": true,
+    "unique_fraction": 0.875,
+    "mean_gc": 0.625,
+    "mean_atat_match": 0.25
+  },
+  "method": "udlm",
+  "data": "synthetic DNA; not biological validation",
+  "train_loss_first_20_mean": 5.131326353549957,
+  "train_loss_last_20_mean": 2.2785560965538023,
+  "validation_loss_one_mc_draw": 2.245309829711914,
+  "endpoint_approximation": "t in [0.02, 0.98]; stop at residual noise 0.02, without a posterior interpretation of the UDLM parameter vector"
+}

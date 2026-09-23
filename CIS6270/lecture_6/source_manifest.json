@@ -1,0 +1,132 @@
+[
+  {
+    "paper_title": "Flow Map Matching",
+    "paper_url": "https://arxiv.org/abs/2406.07507v2",
+    "methods": [
+      "fmm-lagrangian",
+      "fmm-eulerian"
+    ],
+    "scope": "Frozen learned velocity teachers; residual-map JVPs; small MLP and bounded time range.",
+    "repository": "nmboffi/flow-maps",
+    "commit": "2f115a07fa9073553193e4b265dfc303827af2b0",
+    "inspected_file": "py/common/losses.py",
+    "inspected_file_sha256": "55d5a6cd2b7602afc93f848bda687aa4a287bfb7d1a4095d5071c7df59334d59"
+  },
+  {
+    "paper_title": "How to build a consistency model: Learning flow maps via self-distillation",
+    "paper_url": "https://arxiv.org/abs/2505.18825v2",
+    "methods": [
+      "self-distill"
+    ],
+    "scope": "Diagonal regression plus an EMA progressive target, normalized by a floored interval length. Learned uncertainty weights are omitted.",
+    "repository": "nmboffi/flow-maps",
+    "commit": "2f115a07fa9073553193e4b265dfc303827af2b0",
+    "inspected_file": "py/common/losses.py",
+    "inspected_file_sha256": "55d5a6cd2b7602afc93f848bda687aa4a287bfb7d1a4095d5071c7df59334d59"
+  },
+  {
+    "paper_title": "One Step Diffusion via Shortcut Models",
+    "paper_url": "https://arxiv.org/abs/2410.12557v3",
+    "methods": [
+      "shortcut"
+    ],
+    "scope": "Two half-step average target and dyadic intervals retained. Continuous start-time sampling and small MLP replace image-specific schedules and clipping.",
+    "repository": "kvfrans/shortcut-models",
+    "commit": "601004348667094e1b71f30942199759412d4432",
+    "inspected_file": "targets_shortcut.py",
+    "inspected_file_sha256": "adb2ac83febc1de012a7cdb713b9117d53616473ccd38f1104fd2475d8b1abc3"
+  },
+  {
+    "paper_title": "Mean Flows for One-step Generative Modeling",
+    "paper_url": "https://arxiv.org/abs/2505.13447",
+    "methods": [
+      "meanflow"
+    ],
+    "scope": "Backward clock, conditional-velocity JVP, detached target, adaptive loss, and 75% diagonal proportion retained. Uniform time sampling; no class guidance.",
+    "repository": "Gsunshine/meanflow",
+    "commit": "d70cb55d298ee03c53bf6da67bec281082e4e2d9",
+    "inspected_file": "meanflow.py",
+    "inspected_file_sha256": "b8dcee1033e6ba01de0019d14fad846a399d356d67e549ee311a5e19d2a7c3a4"
+  },
+  {
+    "paper_title": "Flow Map Language Models: One-step Language Modeling via Continuous Denoising",
+    "paper_url": "https://arxiv.org/abs/2602.16813v3",
+    "methods": [
+      "fmlm"
+    ],
+    "scope": "PSD denoiser target and Gaussian decoding clock retained. Independent clean-data diagonal supervision; EMA targets; quadrature lookup and MLP replace full language architecture.",
+    "repository": "david3684/flm",
+    "commit": "a1918d5164e5038e37d0b7a4fb2010ce75b863b3",
+    "inspected_file": "algo.py",
+    "inspected_file_sha256": "65206adc72013bb9b09b68fd847239b3193dd65fd59669bbdee42e061583d76a"
+  },
+  {
+    "paper_title": "Categorical Flow Maps",
+    "paper_url": "https://arxiv.org/abs/2602.12233v1",
+    "methods": [
+      "categorical"
+    ],
+    "scope": "Released ECLD endpoint CE plus sum-of-squares time energy. Detached-target KL has identical student gradient. EMA target replaces the current network target.",
+    "repository": "olsdavis/semicat",
+    "commit": "558602a0fa722514e4a6012f5c46a8ae178b3068",
+    "inspected_file": "semicat/models/semicat.py",
+    "inspected_file_sha256": "82f4bf2cab2fcfa78ccfc59d9094e6c3132f5c2933c1cd7e61ff0b644ac71425"
+  },
+  {
+    "paper_title": "Discrete Flow Maps",
+    "paper_url": "https://arxiv.org/abs/2604.09784v1",
+    "methods": [
+      "discrete-lsd",
+      "discrete-esd"
+    ],
+    "scope": "Derived from the paper. The linked project page has a placeholder Code link, so no author implementation was verified. Positive log denominators are explicitly clamped and counted; no gradient surgery."
+  },
+  {
+    "paper_title": "Diamond Maps: Stochastic Flow Maps",
+    "paper_url": "https://arxiv.org/abs/2602.05993",
+    "methods": [
+      "diamond"
+    ],
+    "scope": "GLASS conditional velocity and Lagrangian posterior distillation. Exact Gaussian-mixture denoiser replaces a pretrained image teacher. Weighted posterior recovery uses an explicit Gaussian proposal with a known density.",
+    "repository": "PeterHolderrieth/diamond_maps",
+    "commit": "d30f65c75a169a2ed624f146b2770aeef882543a",
+    "inspected_file": "posterior_diamond_maps/py/common/losses.py",
+    "inspected_file_sha256": "acb26f1e717e43a648661c1641cadd4a573ed2672b53210ad1ddb207c6a6ac1e"
+  },
+  {
+    "paper_title": "Meta Flow Maps enable scalable reward alignment",
+    "paper_url": "https://arxiv.org/abs/2601.14430v2",
+    "methods": [
+      "meta"
+    ],
+    "scope": "Data training with independent inner/outer noises and a shared endpoint; conditional semigroup objective. Optional Equation 43 fine-tuning also checked against src/mfm/losses/finetune.py.",
+    "repository": "adh1s/mfm",
+    "commit": "53c0f60db695cad88bbace8fb26469614e9e7d7d",
+    "inspected_file": "src/mfm/losses/losses.py",
+    "inspected_file_sha256": "52b99238199f5d6ac691c15566463d52725a6f7ebcdef1e252b2d28da5eb1df2"
+  },
+  {
+    "paper_title": "Expanding Flow Maps",
+    "paper_url": "https://arxiv.org/abs/2607.21585v1",
+    "methods": [
+      "expanding"
+    ],
+    "scope": "Paper Algorithms 2-4 and local-clock equations. The inspected repository contains README and artwork only. Classroom implementation includes a shared lifted canvas, remaining/interval count heads, explicit local clocks, and budget-capped binomial insertions.",
+    "repository": "sophtang/ExpandingFlowMaps",
+    "commit": "4defc1ff168d12526d85b551bea78150b9aec605",
+    "inspected_file": "README.md",
+    "inspected_file_sha256": "d2a55e221a909f7282609cc661e49c07a241570dcd1dab7b55c6df207f821f4a"
+  },
+  {
+    "paper_title": "Strong Stochastic Flow Maps",
+    "paper_url": "https://arxiv.org/abs/2606.01086v1",
+    "methods": [
+      "ssfm"
+    ],
+    "scope": "First two Legendre integrals, Chen composition, known diffusion, small-step matching. The released loss detaches an EMA split target; paper Algorithm 1 detaches the direct target. Both orientations are selectable. OU replaces image/molecular experiments; no learned uncertainty weights.",
+    "repository": "sammccallum/ssfm",
+    "commit": "24b563620a8ee61c683d791fe802b56668f98f9b",
+    "inspected_file": "ssfm/losses.py",
+    "inspected_file_sha256": "3c4414ffb29c906272831e3642827131582c4741fb2457cb71d122564da29233"
+  }
+]

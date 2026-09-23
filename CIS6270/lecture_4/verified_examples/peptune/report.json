@@ -1,0 +1,350 @@
+{
+  "metrics": {
+    "valid_dna": true,
+    "unique_fraction": 1.0,
+    "mean_gc": 0.75,
+    "mean_atat_match": 0.25
+  },
+  "method": "peptune",
+  "data": "synthetic DNA; not biological validation",
+  "train_loss_first_20_mean": 4.838834500312805,
+  "train_loss_last_20_mean": 2.613932800292969,
+  "validation_loss_one_mc_draw": 2.5891432762145996,
+  "archive_scores": [
+    [
+      1.0,
+      0.0
+    ],
+    [
+      0.5,
+      0.5
+    ],
+    [
+      0.75,
+      0.25
+    ]
+  ],
+  "search_trace": [
+    {
+      "iteration": 0,
+      "archive_size": 1,
+      "score": [
+        0.25,
+        0.25
+      ]
+    },
+    {
+      "iteration": 1,
+      "archive_size": 2,
+      "score": [
+        0.5,
+        0.0
+      ]
+    },
+    {
+      "iteration": 2,
+      "archive_size": 2,
+      "score": [
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "iteration": 3,
+      "archive_size": 2,
+      "score": [
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "iteration": 4,
+      "archive_size": 2,
+      "score": [
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "iteration": 5,
+      "archive_size": 2,
+      "score": [
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "iteration": 6,
+      "archive_size": 2,
+      "score": [
+        0.5,
+        0.0
+      ]
+    },
+    {
+      "iteration": 7,
+      "archive_size": 2,
+      "score": [
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "iteration": 8,
+      "archive_size": 2,
+      "score": [
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "iteration": 9,
+      "archive_size": 2,
+      "score": [
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "iteration": 10,
+      "archive_size": 2,
+      "score": [
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "iteration": 11,
+      "archive_size": 3,
+      "score": [
+        0.75,
+        0.25
+      ]
+    },
+    {
+      "iteration": 12,
+      "archive_size": 3,
+      "score": [
+        0.5,
+        0.0
+      ]
+    },
+    {
+      "iteration": 13,
+      "archive_size": 3,
+      "score": [
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "iteration": 14,
+      "archive_size": 3,
+      "score": [
+        0.5,
+        0.0
+      ]
+    },
+    {
+      "iteration": 15,
+      "archive_size": 3,
+      "score": [
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "iteration": 16,
+      "archive_size": 3,
+      "score": [
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "iteration": 17,
+      "archive_size": 3,
+      "score": [
+        0.5,
+        0.0
+      ]
+    },
+    {
+      "iteration": 18,
+      "archive_size": 3,
+      "score": [
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "iteration": 19,
+      "archive_size": 3,
+      "score": [
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "iteration": 20,
+      "archive_size": 3,
+      "score": [
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "iteration": 21,
+      "archive_size": 3,
+      "score": [
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "iteration": 22,
+      "archive_size": 3,
+      "score": [
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "iteration": 23,
+      "archive_size": 3,
+      "score": [
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "iteration": 24,
+      "archive_size": 3,
+      "score": [
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "iteration": 25,
+      "archive_size": 3,
+      "score": [
+        0.5,
+        0.0
+      ]
+    },
+    {
+      "iteration": 26,
+      "archive_size": 3,
+      "score": [
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "iteration": 27,
+      "archive_size": 3,
+      "score": [
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "iteration": 28,
+      "archive_size": 3,
+      "score": [
+        0.5,
+        0.0
+      ]
+    },
+    {
+      "iteration": 29,
+      "archive_size": 3,
+      "score": [
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "iteration": 30,
+      "archive_size": 3,
+      "score": [
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "iteration": 31,
+      "archive_size": 3,
+      "score": [
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "iteration": 32,
+      "archive_size": 3,
+      "score": [
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "iteration": 33,
+      "archive_size": 3,
+      "score": [
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "iteration": 34,
+      "archive_size": 3,
+      "score": [
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "iteration": 35,
+      "archive_size": 3,
+      "score": [
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "iteration": 36,
+      "archive_size": 3,
+      "score": [
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "iteration": 37,
+      "archive_size": 3,
+      "score": [
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "iteration": 38,
+      "archive_size": 3,
+      "score": [
+        0.5,
+        0.0
+      ]
+    },
+    {
+      "iteration": 39,
+      "archive_size": 3,
+      "score": [
+        0.5,
+        0.5
+      ]
+    }
+  ],
+  "scope": "DNA MCTS mechanism; not peptide-model training or paper reproduction"
+}

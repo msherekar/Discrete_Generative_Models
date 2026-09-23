@@ -1,0 +1,17 @@
+{
+  "loss_samples": [
+    7.3629350662231445,
+    2.587479591369629,
+    2.914459228515625,
+    2.577214241027832,
+    2.421154499053955,
+    2.473465919494629
+  ],
+  "velocity_mse": 0.0012646804098039865,
+  "score_mse": 0.004505303222686052,
+  "terminal_mean": 1.9784085750579834,
+  "terminal_variance": 1.0008724927902222,
+  "target_mean": 2.0,
+  "target_variance": 1.0,
+  "approximation": "Small neural velocity/score, exact Gaussian endpoint coupling, finite-step Euler SDE."
+}

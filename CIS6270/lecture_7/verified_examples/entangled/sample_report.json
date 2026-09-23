@@ -1,0 +1,10 @@
+{
+  "method": "entangled",
+  "sampling_seed": 112,
+  "samples": 128,
+  "mean": 0.14170975983142853,
+  "minimum_bias_alignment": 0.034214965999126434,
+  "terminal_potential_mean": 0.1995772421360016,
+  "approximation": "Overdamped interacting-particle Euler chain; terminal potential, not an enforced target marginal.",
+  "finite_values": true
+}

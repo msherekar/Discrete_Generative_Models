@@ -1,0 +1,18 @@
+{
+  "metrics": {
+    "valid_dna": true,
+    "unique_fraction": 1.0,
+    "mean_gc": 0.4375,
+    "mean_atat_match": 0.3125
+  },
+  "method": "gumbel",
+  "data": "synthetic DNA; not biological validation",
+  "train_loss_first_20_mean": 0.8744158446788788,
+  "train_loss_last_20_mean": 0.355621962249279,
+  "validation_loss_one_mc_draw": 0.3075082004070282,
+  "negative_coordinate_corrections": 468,
+  "max_probability_sum_error": 1.1920928955078125e-07,
+  "finite_endpoint": true,
+  "decode": "argmax",
+  "gumbel_scope": "beta=1, tau_max=4, decay=4; finite noisy endpoint and approximate data-independent base; no exact data endpoint claim"
+}

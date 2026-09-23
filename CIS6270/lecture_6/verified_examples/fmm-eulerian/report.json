@@ -1,0 +1,24 @@
+{
+  "method": "fmm-eulerian",
+  "data_kind": "four-gaussian-mixture",
+  "train_loss_first_20_mean": 1.9930766880512238,
+  "train_loss_last_20_mean": 2.0371171474456786,
+  "training_steps": 1000,
+  "python": "3.12.14",
+  "torch": "2.9.1+cpu",
+  "sample_steps": 8,
+  "samples": 128,
+  "sampling_seed": 6370,
+  "composition_rmse": 0.11971178650856018,
+  "finite_samples": true,
+  "mean_distance_to_center": 0.47431039810180664,
+  "mode_fractions": [
+    0.265625,
+    0.2421875,
+    0.25,
+    0.2421875
+  ],
+  "mode_entropy": 1.3855692148208618,
+  "mean_target_log_density": -3.866715431213379,
+  "elapsed_seconds": 5.261868300003698
+}
