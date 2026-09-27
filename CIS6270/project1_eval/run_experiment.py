@@ -15,7 +15,8 @@ Output layout:
   outputs/<esm_model>_<dataset_tag>/
     flow/       results.pt, cfg.fasta, single.fasta, multi.fasta
     diffusion/  results.pt, cfg.fasta, single.fasta, multi.fasta
-    cache/      HuggingFace model weights (shared across runs for same model)
+
+  cache/        HuggingFace weights, shared by every model and every run
 """
 import argparse
 import csv
@@ -37,6 +38,20 @@ POLAR_RESIDUES = "DEHKNQRST"
 BATCH_SIZE, HIDDEN, LEARNING_RATE = 16, 128, 1e-3
 CONDITION_DROP = 0.2
 
+# One HuggingFace cache for every model and every run. HF already namespaces
+# downloads as models--facebook--<name>, so an extra per-model or per-run
+# subdirectory only causes the same weights to be fetched again.
+DEFAULT_CACHE = ROOT / "cache"
+
+
+def resolve_cache_dir(override=None) -> Path:
+    """Shared ESM-2 weight cache: --cache-dir, else $ESM2_CACHE, else ROOT/cache."""
+    import os
+    chosen = override or os.environ.get("ESM2_CACHE") or DEFAULT_CACHE
+    path = Path(chosen).expanduser().resolve()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Composition proxies
@@ -55,15 +70,15 @@ def composition_proxies(sequences):
 # ══════════════════════════════════════════════════════════════════════════════
 
 @torch.no_grad()
-def load_data(csv_path: Path, esm_hf_id: str, cache_dir: Path):
+def load_data(csv_path: Path, esm_hf_id: str, cache_dir: Path, max_length: int = 128):
     with csv_path.open(newline="") as f:
         rows = list(csv.DictReader(f))
     sequences = [r["sequence"].strip().upper() for r in rows]
     if len(rows) < 4 or any(not s or set(s) - set(AMINO_ACIDS) for s in sequences):
         raise ValueError("Supply at least four sequences using the 20 standard amino acids")
     lengths = {len(s) for s in sequences}
-    if len(lengths) != 1 or max(lengths) > 128:
-        raise ValueError("Sequences must all be the same length, at most 128")
+    if len(lengths) != 1 or max(lengths) > max_length:
+        raise ValueError(f"Sequences must all be the same length, at most {max_length}")
     c = torch.tensor([int(r["c"]) for r in rows], dtype=torch.long)
     if {"r1", "r2"}.issubset(rows[0]):
         r = torch.tensor([[float(r["r1"]), float(r["r2"])] for r in rows])
@@ -236,16 +251,32 @@ def reward_gradient(reward_model, z, t, lambdas):
 
 
 @torch.no_grad()
-def sample_flow(model, reward_model, n=8, c=1, w=0.0, eta=0.0, lambdas=(1., 0.), steps=200):
+def sample_flow(model, reward_model, n=8, c=1, w=0.0, eta=0.0, lambdas=(1., 0.), steps=200,
+                anchor=None, strength=1.0):
+    """Integrate the velocity field from t=0 to t=1.
+
+    With `anchor` (a standardized reference latent) the trajectory starts from a
+    partially noised anchor at t = 1 - strength instead of pure noise at t = 0.
+    Every measured avGFP variant sits within 15 substitutions of the wild type,
+    a vanishingly small region of a 237x320 latent space, so integrating from
+    N(0, I) rarely lands on it. strength=1.0 reproduces the unanchored path.
+    """
     lam = torch.tensor(lambdas, dtype=torch.float32, device=DEVICE)
     lam = lam / lam.sum()
     torch.manual_seed(123)
-    z    = torch.randn(n, model.length, model.dim, device=DEVICE)
+    start = 0.0
+    if anchor is None:
+        z = torch.randn(n, model.length, model.dim, device=DEVICE)
+    else:
+        start = 1.0 - float(strength)
+        z1    = anchor.to(DEVICE).expand(n, -1, -1)
+        z0    = torch.randn(n, model.length, model.dim, device=DEVICE)
+        z     = (1 - start) * z0 + start * z1      # the path's own interpolant at t=start
     null = torch.full((n,), 2, dtype=torch.long, device=DEVICE)
     cond = torch.full((n,), c, dtype=torch.long, device=DEVICE)
-    dt   = 1.0 / steps
+    dt   = (1.0 - start) / steps
     for step in range(steps):
-        t = torch.full((n,), step * dt, device=DEVICE)
+        t = torch.full((n,), start + step * dt, device=DEVICE)
         v = model(z, t, null)
         if w:
             v = v + w * (model(z, t, cond) - model(z, t, null))
@@ -258,15 +289,30 @@ def sample_flow(model, reward_model, n=8, c=1, w=0.0, eta=0.0, lambdas=(1., 0.),
 
 @torch.no_grad()
 def sample_diffusion(model, reward_model, alpha_bars, betas, alphas, post_vars,
-                     n=8, c=1, w=0.0, eta=0.0, lambdas=(1., 0.)):
+                     n=8, c=1, w=0.0, eta=0.0, lambdas=(1., 0.),
+                     anchor=None, strength=1.0):
+    """Run the reverse chain from step K down to 1.
+
+    With `anchor` the chain starts at step round(strength * K) from the forward-
+    noised anchor (SDEdit), rather than at K from pure noise. strength=1.0
+    reproduces the unanchored chain.
+    """
     lam = torch.tensor(lambdas, dtype=torch.float32, device=DEVICE)
     lam = lam / lam.sum()
     K    = len(betas) - 1
     torch.manual_seed(123)
-    z    = torch.randn(n, model.length, model.dim, device=DEVICE)
+    start = K
+    if anchor is None:
+        z = torch.randn(n, model.length, model.dim, device=DEVICE)
+    else:
+        start = max(1, min(K, int(round(float(strength) * K))))
+        a     = alpha_bars[start]
+        z1    = anchor.to(DEVICE).expand(n, -1, -1)
+        z     = a.sqrt() * z1 + (1 - a).sqrt() * torch.randn(n, model.length, model.dim,
+                                                             device=DEVICE)
     null = torch.full((n,), 2, dtype=torch.long, device=DEVICE)
     cond = torch.full((n,), c, dtype=torch.long, device=DEVICE)
-    for k in range(K, 0, -1):
+    for k in range(start, 0, -1):
         t   = torch.full((n,), k / K, device=DEVICE)
         eps = model(z, t, null)
         if w:
@@ -304,13 +350,51 @@ def decode(z, esm, tokenizer, stats, min_polar=12):
     return ["".join(AMINO_ACIDS[i] for i in row) for row in choices.cpu().tolist()]
 
 
+@torch.no_grad()
+def encode_reference(sequence, esm, tokenizer, stats):
+    """Standardized ESM-2 latent for one reference sequence, shaped [1, L, dim]."""
+    toks = tokenizer([sequence], return_tensors="pt")
+    toks = {k: v.to(DEVICE) for k, v in toks.items()}
+    h = esm.esm(**toks).last_hidden_state[:, 1:-1].cpu()
+    return ((h - stats["z_mean"]) / stats["z_std"]).to(DEVICE)
+
+
+def consensus(sequences):
+    """Per-position most common residue; equals the wild type for DMS variant sets."""
+    return "".join(max(AMINO_ACIDS, key=lambda a: sum(s[i] == a for s in sequences))
+                   for i in range(len(sequences[0])))
+
+
+@torch.no_grad()
+def decode_budget(z, esm, tokenizer, stats, reference, budget):
+    """Decode as a variant of `reference` with at most `budget` substitutions.
+
+    Keeps the reference residue everywhere except the `budget` positions whose
+    argmax residue beats it by the largest logit margin — the domain analogue of
+    the min-polar constraint for deep mutational scanning data.
+    """
+    latent = z * stats["z_std"].to(z.device) + stats["z_mean"].to(z.device)
+    aa_ids = torch.tensor(tokenizer.convert_tokens_to_ids(list(AMINO_ACIDS)), device=z.device)
+    logits = esm.lm_head(latent).index_select(-1, aa_ids)
+    ref_ids = torch.tensor([AMINO_ACIDS.index(a) for a in reference], device=z.device)
+    best_scores, choices = logits.max(dim=-1)
+    ref_scores = logits.gather(-1, ref_ids.expand(len(z), -1)[..., None]).squeeze(-1)
+    margin = (best_scores - ref_scores).masked_fill(choices == ref_ids, -float("inf"))
+    keep = margin.topk(min(budget, margin.shape[1]), dim=1).indices
+    decoded = ref_ids.expand(len(z), -1).clone()
+    for i in range(len(z)):
+        positions = keep[i][margin[i, keep[i]] > 0]
+        decoded[i, positions] = choices[i, positions]
+    return ["".join(AMINO_ACIDS[i] for i in row) for row in decoded.cpu().tolist()]
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Save results
 # ══════════════════════════════════════════════════════════════════════════════
 
 def save_results(out_dir: Path, method: str, latents: dict, model, reward_model,
                  stats, esm_hf_id: str, length: int, dim: int,
-                 min_polar: int, losses: list):
+                 min_polar: int, losses: list, config: dict | None = None):
     method_dir = out_dir / method
     method_dir.mkdir(parents=True, exist_ok=True)
     for name, latent in latents.items():
@@ -328,6 +412,7 @@ def save_results(out_dir: Path, method: str, latents: dict, model, reward_model,
         "min_polar":    min_polar,
         "polar_residues": POLAR_RESIDUES,
         "losses":       losses,
+        "config":       config or {},
     }, method_dir / "results.pt")
     print(f"  Saved {method} results to {method_dir}/")
 
@@ -350,8 +435,25 @@ def main():
     parser.add_argument("--epochs",     type=int, default=200)
     parser.add_argument("--samples",    type=int, default=8)
     parser.add_argument("--min-polar",  type=int, default=12)
+    parser.add_argument("--max-length", type=int, default=128,
+                        help="Maximum (and shared) sequence length. Raise to 237 for avGFP.")
+    parser.add_argument("--mut-budget", type=int, default=None,
+                        help="Decode as variants of a reference with at most this many "
+                             "substitutions (replaces the min-polar constraint). "
+                             "The reference defaults to the training-set consensus.")
+    parser.add_argument("--reference",  type=Path, default=None,
+                        help="File holding the reference sequence for --mut-budget "
+                             "(e.g. data/avgfp_wt.txt). Default: training consensus.")
     parser.add_argument("--outdir",     type=Path, default=None,
                         help="Override output root. Default: outputs/<esm_model>_<dataset_tag>/")
+    parser.add_argument("--anchor-strength", type=float, default=None, metavar="S",
+                        help="Start sampling from the partially noised reference instead of "
+                             "pure noise. S in (0,1]: 0.3 keeps the reference largely intact, "
+                             "1.0 is the unanchored baseline. Requires --reference or "
+                             "--mut-budget (which supplies the consensus reference).")
+    parser.add_argument("--cache-dir",  type=Path, default=None,
+                        help="Shared HuggingFace weight cache. Default: $ESM2_CACHE, "
+                             "else project1_eval/cache/ (one copy per model, reused by all runs).")
     parser.add_argument("--plot",        action="store_true",
                         help="Generate all evaluation plots (including training-loss curves) "
                              "immediately after training, using in-memory results.")
@@ -370,7 +472,7 @@ def main():
     dataset_tag = args.dataset_tag or Path(args.dataset).stem
     run_tag     = f"{args.esm_model}_{dataset_tag}"
     out_root    = args.outdir or ROOT / "outputs" / run_tag
-    cache_dir   = ROOT / "cache" / args.esm_model
+    cache_dir   = resolve_cache_dir(args.cache_dir)
     out_root.mkdir(parents=True, exist_ok=True)
 
     print(f"\nProject 1 — Experiment Runner")
@@ -387,12 +489,62 @@ def main():
     # ── Encode ────────────────────────────────────────────────────────────────
     print("\nEncoding sequences with ESM-2...")
     dataset, esm, tokenizer, stats, sequences = load_data(
-        args.dataset, model_info["hf_id"], cache_dir
+        args.dataset, model_info["hf_id"], cache_dir, args.max_length
     )
     _, length, dim = dataset.tensors[0].shape
 
     if not 0 <= args.min_polar <= length:
         parser.error(f"--min-polar must be between 0 and {length}")
+
+    reference = None
+    if args.reference is not None or args.mut_budget is not None or args.anchor_strength is not None:
+        reference = (args.reference.read_text().strip().upper() if args.reference
+                     else consensus(sequences))
+        if len(reference) != length:
+            parser.error(f"reference has {len(reference)} residues, expected {length}")
+        source = "supplied" if args.reference else "consensus"
+
+    if args.mut_budget is None:
+        decode_fn = lambda z: decode(z, esm, tokenizer, stats, args.min_polar)
+    else:
+        print(f"  Decoding with a {args.mut_budget}-substitution budget from the "
+              f"{source} reference")
+        decode_fn = lambda z: decode_budget(z, esm, tokenizer, stats, reference, args.mut_budget)
+
+    anchor = None
+    if args.anchor_strength is not None:
+        if not 0.0 < args.anchor_strength <= 1.0:
+            parser.error("--anchor-strength must be in (0, 1]")
+        anchor = encode_reference(reference, esm, tokenizer, stats)
+        print(f"  Anchoring sampling at strength {args.anchor_strength} "
+              f"from the {source} reference")
+    anchor_kwargs = {} if anchor is None else {"anchor": anchor,
+                                               "strength": args.anchor_strength}
+
+    run_config = {
+        "dataset":         str(args.dataset),
+        "esm_model":       args.esm_model,
+        "epochs":          args.epochs,
+        "samples":         args.samples,
+        "max_length":      args.max_length,
+        "decode":          "mut_budget" if args.mut_budget is not None else "min_polar",
+        "mut_budget":      args.mut_budget,
+        "min_polar":       args.min_polar,
+        "reference":       reference,
+        "anchor_strength": args.anchor_strength,
+    }
+
+    def report(name, seqs):
+        if reference is None:
+            proxies = composition_proxies(seqs)
+            print(f"  {name}: {seqs[0][:48]}...  "
+                  f"polar={sum(a in POLAR_RESIDUES for a in seqs[0])}  "
+                  f"r1={proxies[:,0].mean():.3f}  r2={proxies[:,1].mean():.3f}")
+        else:
+            distances = [sum(a != b for a, b in zip(s, reference)) for s in seqs]
+            print(f"  {name}: {seqs[0][:48]}...  "
+                  f"mean hamming to reference {sum(distances)/len(distances):.1f} "
+                  f"(min {min(distances)}, max {max(distances)})")
 
     guidance_configs = {
         "cfg":    dict(c=1, w=2.0,  eta=0.0, lambdas=(1., 0.)),
@@ -408,14 +560,13 @@ def main():
     print("\nSampling (flow)...")
     flow_latents = {}
     for name, cfg in guidance_configs.items():
-        z    = sample_flow(flow_model, flow_reward, n=args.samples, **cfg)
-        seqs = decode(z, esm, tokenizer, stats, args.min_polar)
-        proxies = composition_proxies(seqs)
-        print(f"  {name}: {seqs[0]}  polar={sum(a in POLAR_RESIDUES for a in seqs[0])}  "
-              f"r1={proxies[:,0].mean():.3f}  r2={proxies[:,1].mean():.3f}")
+        z    = sample_flow(flow_model, flow_reward, n=args.samples, **cfg, **anchor_kwargs)
+        seqs = decode_fn(z)
+        report(name, seqs)
         flow_latents[name] = {"latent": z, "sequences": seqs}
     save_results(out_root, "flow", flow_latents, flow_model, flow_reward,
-                 stats, model_info["hf_id"], length, dim, args.min_polar, flow_losses)
+                 stats, model_info["hf_id"], length, dim, args.min_polar, flow_losses,
+                 run_config)
 
     # ── Diffusion ─────────────────────────────────────────────────────────────
     print("\nTraining diffusion model...")
@@ -427,14 +578,13 @@ def main():
     diff_latents = {}
     for name, cfg in guidance_configs.items():
         z    = sample_diffusion(diff_model, diff_reward, alpha_bars, betas, alphas, post_vars,
-                                n=args.samples, **cfg)
-        seqs = decode(z, esm, tokenizer, stats, args.min_polar)
-        proxies = composition_proxies(seqs)
-        print(f"  {name}: {seqs[0]}  polar={sum(a in POLAR_RESIDUES for a in seqs[0])}  "
-              f"r1={proxies[:,0].mean():.3f}  r2={proxies[:,1].mean():.3f}")
+                                n=args.samples, **cfg, **anchor_kwargs)
+        seqs = decode_fn(z)
+        report(name, seqs)
         diff_latents[name] = {"latent": z, "sequences": seqs}
     save_results(out_root, "diffusion", diff_latents, diff_model, diff_reward,
-                 stats, model_info["hf_id"], length, dim, args.min_polar, diff_losses)
+                 stats, model_info["hf_id"], length, dim, args.min_polar, diff_losses,
+                 run_config)
 
     print(f"\nDone. Results in {out_root}/")
 
