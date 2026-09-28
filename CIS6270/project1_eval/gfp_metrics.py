@@ -9,7 +9,7 @@ Usage:
   python gfp_metrics.py --run-dir outputs/esm2_8m_avgfp_train_4000
   python gfp_metrics.py --run-dir outputs/... --train data/avgfp_train_4000.csv
 """
-import argparse, csv
+import argparse, csv, random
 from pathlib import Path
 
 import matplotlib
@@ -19,10 +19,13 @@ import numpy as np
 
 from gfp_oracle import in_domain, load_fasta, load_oracle, score_sequences
 
+import embedding_oracle as embo
+
 ROOT        = Path(__file__).resolve().parent
 METHODS     = ("flow", "diffusion")
 MODES       = ("cfg", "single", "multi")
 CHROMOPHORE = (63, 64, 65)
+AMINO_ACIDS = "ACDEFGHIKLMNPQRSTVWY"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -38,25 +41,97 @@ def chromophore_intact(sequences: list[str], wt: str) -> np.ndarray:
     return np.array([float("".join(seq[i] for i in CHROMOPHORE) == target) for seq in sequences])
 
 
-def score_set(sequences: list[str], wt: str, oracle, known: set[str]) -> list[dict]:
+def oracle_support(oracle) -> set[tuple[int, str]]:
+    """(position, residue) substitutions the oracle was actually fit on.
+
+    A ridge oracle on mutation indicators has a nonzero coefficient only where it
+    saw data; everywhere else it contributes nothing and the prediction falls back
+    to the intercept. This set is what "observed" means for that oracle.
+    """
+    coef, _, wt, _ = oracle
+    return {(p, AMINO_ACIDS[a]) for p in range(len(wt)) for a in range(len(AMINO_ACIDS))
+            if abs(float(coef[p * len(AMINO_ACIDS) + a])) > 1e-9}
+
+
+def random_baseline(wt: str, counts, support: set[tuple[int, str]],
+                    observed: bool, seed: int = 0) -> list[str]:
+    """Random variants matched to `counts` substitutions each.
+
+    `observed` draws only substitutions the oracle has seen; otherwise it draws
+    only substitutions it has never seen. This mirrors the Observed AA and
+    Unobserved AA design settings in the METL study, whose random variants exist
+    to show that a design's score reflects the model rather than chance. If a
+    guided sample scores no better than its matched random baseline, the oracle
+    is not measuring the thing the guidance was supposed to improve.
+    """
+    rng = random.Random(seed)
+    by_position: dict[int, list[str]] = {}
+    for p in range(len(wt)):
+        options = [a for a in AMINO_ACIDS
+                   if a != wt[p] and (((p, a) in support) == observed)]
+        if options:
+            by_position[p] = options
+    if not by_position:
+        return []
+    positions = sorted(by_position)
+    out = []
+    for k in counts:
+        k = max(1, min(int(k), len(positions)))
+        seq = list(wt)
+        for p in rng.sample(positions, k):
+            seq[p] = rng.choice(by_position[p])
+        out.append("".join(seq))
+    return out
+
+
+def score_set(sequences: list[str], wt: str, oracle, known: set[str],
+              embedding=None) -> list[dict]:
     brightness = score_sequences(sequences, oracle)
     distance   = hamming(sequences, wt)
     intact     = chromophore_intact(sequences, wt)
     inside     = in_domain(sequences, oracle)
-    return [{"oracle_brightness": round(float(b), 4), "hamming_to_wt": int(d),
-             "chromophore_intact": int(c), "novel": int(s not in known),
-             "in_domain": int(k), "sequence": s}
-            for s, b, d, c, k in zip(sequences, brightness, distance, intact, inside)]
+    # The indicator oracle returns its intercept for any substitution the assay
+    # never measured, so it cannot rank novel designs. The embedding oracle can.
+    emb = (embo.score_sequences(list(sequences), embedding)
+           if embedding is not None else [None] * len(sequences))
+    out = []
+    for s, b, d, c, k, e in zip(sequences, brightness, distance, intact, inside, emb):
+        # The wild type is absent from the training set -- every measured variant
+        # carries at least one mutation -- so a plain set-membership test calls it
+        # novel. Returning the unmutated wild type is not a design.
+        row = {"oracle_brightness": round(float(b), 4), "hamming_to_wt": int(d),
+               "chromophore_intact": int(c),
+               "novel": int(d > 0 and s not in known),
+               "is_wildtype": int(d == 0),
+               "in_domain": int(k)}
+        if e is not None:
+            row["embedding_brightness"] = round(float(e), 4)
+        row["sequence"] = s
+        out.append(row)
+    return out
 
 
-def collect(run_dir: Path, wt: str, oracle, known: set[str]) -> list[dict]:
+def training_set_from_run(run_dir: Path) -> Path | None:
+    """The dataset a run was actually trained on, as recorded in results.pt."""
+    import torch
+    for method in METHODS:
+        results = run_dir / method / "results.pt"
+        if results.is_file():
+            config = torch.load(results, weights_only=False, map_location="cpu").get("config", {})
+            if config.get("dataset"):
+                return Path(config["dataset"])
+    return None
+
+
+def collect(run_dir: Path, wt: str, oracle, known: set[str],
+            embedding=None) -> list[dict]:
     rows = []
     for method in METHODS:
         for mode in MODES:
             fasta = run_dir / method / f"{mode}.fasta"
             if not fasta.exists():
                 continue
-            for row in score_set(load_fasta(fasta), wt, oracle, known):
+            for row in score_set(load_fasta(fasta), wt, oracle, known, embedding):
                 rows.append({"method": method, "mode": mode, **row})
     if not rows:
         raise FileNotFoundError(f"No FASTA files under {run_dir}/{{flow,diffusion}}/")
@@ -64,10 +139,13 @@ def collect(run_dir: Path, wt: str, oracle, known: set[str]) -> list[dict]:
 
 
 def summarize(rows: list[dict], train_rows: list[dict], threshold: float) -> list[dict]:
+    seen: list[tuple[str, str]] = []
+    for r in rows:
+        if (r["method"], r["mode"]) not in seen:
+            seen.append((r["method"], r["mode"]))
     summary = []
     for group, label in [(train_rows, ("training", "data"))] + [
-        ([r for r in rows if (r["method"], r["mode"]) == (m, g)], (m, g))
-        for m in METHODS for g in MODES
+        ([r for r in rows if (r["method"], r["mode"]) == key], key) for key in seen
     ]:
         if not group:
             continue
@@ -78,7 +156,11 @@ def summarize(rows: list[dict], train_rows: list[dict], threshold: float) -> lis
             "mean_hamming":         round(float(np.mean([r["hamming_to_wt"] for r in group])), 2),
             "frac_chromophore":     round(float(np.mean([r["chromophore_intact"] for r in group])), 3),
             "frac_novel":           round(float(np.mean([r["novel"] for r in group])), 3),
+            "frac_wildtype":        round(float(np.mean([r["is_wildtype"] for r in group])), 3),
             "frac_in_domain":       round(float(np.mean([r["in_domain"] for r in group])), 3),
+            **({"mean_embedding_brightness":
+                round(float(np.mean([r["embedding_brightness"] for r in group])), 4)}
+               if "embedding_brightness" in group[0] else {}),
         })
     return summary
 
@@ -90,9 +172,10 @@ def summarize(rows: list[dict], train_rows: list[dict], threshold: float) -> lis
 def plot_brightness(rows, train_rows, out_dir: Path, prefix: str, threshold: float) -> None:
     fig, ax = plt.subplots(figsize=(7, 4))
     groups = [("training\ndata", [r["oracle_brightness"] for r in train_rows])]
+    keys = list(dict.fromkeys((r["method"], r["mode"]) for r in rows))
     groups += [(f"{m[:4]}\n{g}", [r["oracle_brightness"] for r in rows
                                   if (r["method"], r["mode"]) == (m, g)])
-               for m in METHODS for g in MODES]
+               for m, g in keys]
     groups = [(label, values) for label, values in groups if values]
     ax.boxplot([v for _, v in groups], tick_labels=[l for l, _ in groups])
     ax.axhline(threshold, color="crimson", ls="--", lw=1,
@@ -108,13 +191,18 @@ def plot_pareto(rows, train_rows, out_dir: Path, prefix: str) -> None:
     ax.scatter([r["hamming_to_wt"] for r in train_rows],
                [r["oracle_brightness"] for r in train_rows],
                s=8, c="lightgray", label="training data")
-    for method, marker in zip(METHODS, ("o", "^")):
-        for mode, color in zip(MODES, ("tab:blue", "tab:orange", "tab:green")):
+    markers = {"flow": "o", "diffusion": "^", "random": "x"}
+    colors  = {"cfg": "tab:blue", "single": "tab:orange", "multi": "tab:green",
+               "observed": "tab:red", "unobserved": "tab:purple"}
+    for method, mode in dict.fromkeys((r["method"], r["mode"]) for r in rows):
+            marker = markers.get(method, "s")
+            color  = colors.get(mode, "tab:gray")
             group = [r for r in rows if (r["method"], r["mode"]) == (method, mode)]
             if group:
+                edge = {} if marker in "x+" else {"edgecolors": "k", "linewidths": .4}
                 ax.scatter([r["hamming_to_wt"] for r in group],
                            [r["oracle_brightness"] for r in group],
-                           marker=marker, c=color, s=45, edgecolors="k", linewidths=.4,
+                           marker=marker, c=color, s=45, **edge,
                            label=f"{method}/{mode}")
     ax.set_xlabel("Hamming distance to wild type"); ax.set_ylabel("oracle brightness")
     ax.set_title("Brightness vs. mutational parsimony")
@@ -123,8 +211,9 @@ def plot_pareto(rows, train_rows, out_dir: Path, prefix: str) -> None:
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
+    fields = list(dict.fromkeys(k for row in rows for k in row))
     with path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(f, fieldnames=fields, restval="")
         writer.writeheader(); writer.writerows(rows)
 
 
@@ -137,10 +226,21 @@ def parse_args():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run-dir", type=Path, required=True,
                         help="Run output directory holding flow/ and diffusion/")
-    parser.add_argument("--train", type=Path, default=ROOT / "data" / "avgfp_train_4000.csv",
-                        help="Training CSV from prepare_gfp.py (novelty + reference cloud)")
+    parser.add_argument("--train", type=Path, default=None,
+                        help="Training CSV from prepare_gfp.py (novelty + reference "
+                             "cloud). Defaults to whatever the run itself recorded in "
+                             "results.pt, so it cannot silently disagree with the model.")
     parser.add_argument("--oracle", type=Path, default=ROOT / "data" / "avgfp_oracle.npz",
                         help="Fitted oracle from gfp_oracle.py --fit")
+    parser.add_argument("--embedding-oracle", type=Path, default=None, metavar="NPZ",
+                        help="Second oracle from embedding_oracle.py (e.g. "
+                             "data/avgfp_metl_oracle.npz). Unlike the indicator oracle "
+                             "it can rank substitutions the assay never measured.")
+    parser.add_argument("--baseline-n", type=int, default=0, metavar="N",
+                        help="Add N random variants per setting (observed / unobserved "
+                             "substitutions), matched to the generated Hamming distances. "
+                             "0 disables. This is the control that shows whether a guided "
+                             "sample beats chance at the same mutational distance.")
     parser.add_argument("--threshold", type=float, default=-1.0,
                         help="Bright/dark cutoff; must match prepare_gfp.py --threshold")
     parser.add_argument("--outdir", type=Path, default=None,
@@ -157,11 +257,34 @@ def main():
     oracle = load_oracle(args.oracle)
     wt     = oracle[2]
     domain = oracle[3]
-    with args.train.open(newline="") as f:
+    embedding = embo.load_oracle(args.embedding_oracle) if args.embedding_oracle else None
+    if embedding is not None:
+        print(f"  Second oracle: {embedding[3]} backend, from {args.embedding_oracle.name}")
+
+    train_path = args.train or training_set_from_run(args.run_dir)
+    if train_path is None or not train_path.is_file():
+        parser.error(f"could not find the training CSV ({train_path}); pass --train")
+    print(f"  Training set: {train_path.name}")
+
+    with train_path.open(newline="") as f:
         train_seqs = [r["sequence"].strip().upper() for r in csv.DictReader(f)]
     known      = set(train_seqs)
-    train_rows = score_set(train_seqs, wt, oracle, known)
-    rows       = collect(args.run_dir, wt, oracle, known)
+    train_rows = score_set(train_seqs, wt, oracle, known, embedding)
+    rows       = collect(args.run_dir, wt, oracle, known, embedding)
+
+    if args.baseline_n:
+        support = oracle_support(oracle)
+        counts  = [r["hamming_to_wt"] for r in rows] or [4]
+        matched = [counts[i % len(counts)] for i in range(args.baseline_n)]
+        for observed, mode in ((True, "observed"), (False, "unobserved")):
+            seqs = random_baseline(wt, matched, support, observed, seed=7)
+            if not seqs:
+                print(f"  [skip] no {mode} substitutions available for the baseline")
+                continue
+            for row in score_set(seqs, wt, oracle, known, embedding):
+                rows.append({"method": "random", "mode": mode, **row})
+        print(f"  Added {args.baseline_n} random variants per setting, "
+              f"Hamming-matched to the generated samples")
 
     out_dir = args.outdir or ROOT / "plots" / args.run_dir.name
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -172,16 +295,28 @@ def main():
     plot_brightness(rows, train_rows, out_dir, prefix, args.threshold)
     plot_pareto(rows, train_rows, out_dir, prefix)
 
-    header = (f"{'method':<10}{'mode':<9}{'n':>4}{'bright':>9}{'%bright':>9}"
-              f"{'hamming':>9}{'%chromo':>9}{'%novel':>8}{'%indom':>8}")
+    has_emb = any("mean_embedding_brightness" in r for r in summary)
+    header = (f"{'method':<10}{'mode':<9}{'n':>4}{'indicator':>11}"
+              + (f"{'embedding':>11}" if has_emb else "")
+              + f"{'%bright':>9}{'hamming':>9}{'%chromo':>9}{'%novel':>8}"
+                f"{'%wt':>6}{'%indom':>8}")
     print("\n" + header + "\n" + "-" * len(header))
     for row in summary:
-        print(f"{row['method']:<10}{row['mode']:<9}{row['n']:>4}{row['mean_brightness']:>9.3f}"
-              f"{row['frac_bright']:>9.2f}{row['mean_hamming']:>9.1f}"
-              f"{row['frac_chromophore']:>9.2f}{row['frac_novel']:>8.2f}"
-              f"{row['frac_in_domain']:>8.2f}")
+        line = (f"{row['method']:<10}{row['mode']:<9}{row['n']:>4}"
+                f"{row['mean_brightness']:>11.3f}")
+        if has_emb:
+            line += f"{row.get('mean_embedding_brightness', float('nan')):>11.3f}"
+        line += (f"{row['frac_bright']:>9.2f}{row['mean_hamming']:>9.1f}"
+                 f"{row['frac_chromophore']:>9.2f}{row['frac_novel']:>8.2f}"
+                 f"{row['frac_wildtype']:>6.2f}{row['frac_in_domain']:>8.2f}")
+        print(line)
 
-    generated = [r for r in rows]
+    generated = [r for r in rows if r["method"] != "random"]
+    wildtype  = sum(r["is_wildtype"] for r in generated)
+    if wildtype:
+        print(f"\nNote: {wildtype}/{len(generated)} generated samples are the unmutated "
+              f"wild type. They score near 0 by construction and inflate every mean. "
+              f"Use --exact-mutations in run_experiment.py to remove them.")
     outside   = sum(1 for r in generated if not r["in_domain"])
     if outside:
         print(f"\nWarning: {outside}/{len(generated)} generated sequences carry more than "
