@@ -117,10 +117,12 @@ def parse_args():
     parser.add_argument("--dataset-key", default="avgfp", help="Dataset name in datasets.yml")
     parser.add_argument("--data-root", type=Path, default=DATA_ROOT,
                         help="METL dms_data directory (holds datasets.yml)")
-    parser.add_argument("--n", type=int, default=4000,
-                        help="Variants for the generator training CSV (default: 4000)")
-    parser.add_argument("--oracle-n", type=int, default=20000,
-                        help="Variants for the disjoint oracle split (default: 20000)")
+    parser.add_argument("--n", type=int, default=35000,
+                        help="Variants for the generator training CSV (default: 35000). "
+                             "Taken from whatever the oracle split leaves.")
+    parser.add_argument("--oracle-n", type=int, default=16000,
+                        help="Variants for the disjoint oracle split, reserved first and "
+                             "class-balanced (default: 16000)")
     parser.add_argument("--threshold", type=float, default=-1.0,
                         help="Brightness score above which c=1 (default: -1.0)")
     parser.add_argument("--max-mutations", type=int, default=None,
@@ -146,9 +148,16 @@ def main():
 
     annotated = annotate(rows, wt, args.threshold, args.max_mutations)
     random.Random(args.seed).shuffle(annotated)
-    train  = stratified_sample(annotated, args.n, args.seed)
-    used   = {r["variant"] for r in train}
-    oracle = [r for r in annotated if r["variant"] not in used][:args.oracle_n]
+
+    # Reserve the oracle split FIRST, stratified. The dataset holds far more
+    # bright than dark variants, so taking a large generator set first drains the
+    # dark buckets and leaves the oracle fit almost entirely on bright sequences
+    # -- no dynamic range, and a miscalibrated judge. The generator tolerates the
+    # natural class ratio; it only needs both classes present for CFG.
+    oracle = stratified_sample(annotated, args.oracle_n, args.seed)
+    used   = {r["variant"] for r in oracle}
+    train  = stratified_sample([r for r in annotated if r["variant"] not in used],
+                               args.n, args.seed)
 
     write_csv(args.outdir / f"{key}_train_{len(train)}.csv", train)
     write_csv(args.outdir / f"{key}_oracle.csv", oracle)
