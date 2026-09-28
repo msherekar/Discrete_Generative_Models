@@ -22,6 +22,7 @@ import argparse
 import csv
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -115,16 +116,16 @@ def load_data(csv_path: Path, esm_hf_id: str, cache_dir: Path, max_length: int =
 # ══════════════════════════════════════════════════════════════════════════════
 
 class FlowModel(nn.Module):
-    def __init__(self, length, dim):
+    def __init__(self, length, dim, hidden=HIDDEN):
         super().__init__()
         self.length, self.dim = length, dim
         self.time      = nn.Sequential(nn.Linear(1, 32), nn.SiLU(), nn.Linear(32, 32))
         self.skip      = nn.Linear(32, 1)
         self.condition = nn.Embedding(3, 16)
         self.net = nn.Sequential(
-            nn.Linear(length * dim + 48, HIDDEN), nn.SiLU(),
-            nn.Linear(HIDDEN, HIDDEN), nn.SiLU(),
-            nn.Linear(HIDDEN, length * dim),
+            nn.Linear(length * dim + 48, hidden), nn.SiLU(),
+            nn.Linear(hidden, hidden), nn.SiLU(),
+            nn.Linear(hidden, length * dim),
         )
 
     def forward(self, z, t, c):
@@ -134,7 +135,7 @@ class FlowModel(nn.Module):
 
 
 class DiffusionModel(nn.Module):
-    def __init__(self, length, dim, alpha_bars):
+    def __init__(self, length, dim, alpha_bars, hidden=HIDDEN):
         super().__init__()
         self.length, self.dim = length, dim
         self.alpha_bars = alpha_bars
@@ -142,9 +143,9 @@ class DiffusionModel(nn.Module):
         self.time      = nn.Sequential(nn.Linear(1, 32), nn.SiLU(), nn.Linear(32, 32))
         self.condition = nn.Embedding(3, 16)
         self.net = nn.Sequential(
-            nn.Linear(length * dim + 48, HIDDEN), nn.SiLU(),
-            nn.Linear(HIDDEN, HIDDEN), nn.SiLU(),
-            nn.Linear(HIDDEN, length * dim),
+            nn.Linear(length * dim + 48, hidden), nn.SiLU(),
+            nn.Linear(hidden, hidden), nn.SiLU(),
+            nn.Linear(hidden, length * dim),
         )
 
     def forward(self, z, t, c):
@@ -156,11 +157,11 @@ class DiffusionModel(nn.Module):
 
 
 class RewardModel(nn.Module):
-    def __init__(self, length, dim):
+    def __init__(self, length, dim, hidden=HIDDEN):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(length * dim + 1, HIDDEN), nn.SiLU(),
-            nn.Linear(HIDDEN, HIDDEN), nn.SiLU(), nn.Linear(HIDDEN, 2),
+            nn.Linear(length * dim + 1, hidden), nn.SiLU(),
+            nn.Linear(hidden, hidden), nn.SiLU(), nn.Linear(hidden, 2),
         )
 
     def forward(self, z, t):
@@ -180,11 +181,11 @@ def make_ddpm_schedule(K=1000):
 # Training
 # ══════════════════════════════════════════════════════════════════════════════
 
-def train_flow(dataset, epochs):
+def train_flow(dataset, epochs, batch_size=BATCH_SIZE, hidden=HIDDEN):
     _, length, dim = dataset.tensors[0].shape
-    loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
-    model  = FlowModel(length, dim).to(DEVICE)
-    reward = RewardModel(length, dim).to(DEVICE)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    model  = FlowModel(length, dim, hidden).to(DEVICE)
+    reward = RewardModel(length, dim, hidden).to(DEVICE)
     opt    = torch.optim.Adam(list(model.parameters()) + list(reward.parameters()), lr=LEARNING_RATE)
     losses = []
     for epoch in range(epochs):
@@ -207,13 +208,13 @@ def train_flow(dataset, epochs):
     return model, reward, losses
 
 
-def train_diffusion(dataset, epochs):
+def train_diffusion(dataset, epochs, batch_size=BATCH_SIZE, hidden=HIDDEN):
     _, length, dim = dataset.tensors[0].shape
     betas, alphas, alpha_bars, post_vars = make_ddpm_schedule()
     K      = len(betas) - 1
-    loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
-    model  = DiffusionModel(length, dim, alpha_bars).to(DEVICE)
-    reward = RewardModel(length, dim).to(DEVICE)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    model  = DiffusionModel(length, dim, alpha_bars, hidden).to(DEVICE)
+    reward = RewardModel(length, dim, hidden).to(DEVICE)
     opt    = torch.optim.Adam(list(model.parameters()) + list(reward.parameters()), lr=LEARNING_RATE)
     losses = []
     for epoch in range(epochs):
@@ -366,26 +367,116 @@ def consensus(sequences):
 
 
 @torch.no_grad()
-def decode_budget(z, esm, tokenizer, stats, reference, budget):
+def decode_budget(z, esm, tokenizer, stats, reference, budget,
+                  temperature=0.0, frozen=(), exact=False):
     """Decode as a variant of `reference` with at most `budget` substitutions.
 
-    Keeps the reference residue everywhere except the `budget` positions whose
-    argmax residue beats it by the largest logit margin — the domain analogue of
-    the min-polar constraint for deep mutational scanning data.
+    With temperature=0 this takes the argmax and keeps only positions where that
+    argmax beats the reference residue. The rule is deterministic, and on deep
+    mutational scanning data it collapses: ESM's head puts about 0.71 of its mass
+    on the reference residue with ~1.34 nats of entropy, so the reference is the
+    mode at essentially every position even though the distribution is broad.
+    The argmax discards that mass, and fifty different latents decode to a
+    handful of sequences -- measured here as 3 distinct from 50 draws.
+
+    With temperature>0 it instead samples `budget` positions, preferring those
+    the model is least certain about, and samples a residue at each from the
+    per-position distribution. On the same latents, T=0.7 recovers 40 distinct
+    sequences from 50 draws at an unchanged mean Hamming distance.
+
+    `frozen` positions are never substituted. Position 0 is a common choice for
+    avGFP: this wild-type sequence omits the initiator methionine, so ESM wants
+    to put one back, and that single substitution dominates otherwise.
+
+    `budget` is normally a ceiling, not a target: each chosen position keeps the
+    reference residue whenever the sample lands on it, which it does about 70% of
+    the time, so a budget of 5 yields ~1.5 substitutions and leaves ~18% of
+    samples identical to the reference. With `exact=True` the reference residue
+    is excluded at the chosen positions, so every sample carries exactly `budget`
+    substitutions. That makes the mutational distance a controlled variable
+    rather than a confound: comparisons against a baseline no longer have to be
+    matched after the fact, and no sample can score well by declining to mutate.
     """
-    latent = z * stats["z_std"].to(z.device) + stats["z_mean"].to(z.device)
-    aa_ids = torch.tensor(tokenizer.convert_tokens_to_ids(list(AMINO_ACIDS)), device=z.device)
+    device = z.device
+    latent = z * stats["z_std"].to(device) + stats["z_mean"].to(device)
+    aa_ids = torch.tensor(tokenizer.convert_tokens_to_ids(list(AMINO_ACIDS)), device=device)
     logits = esm.lm_head(latent).index_select(-1, aa_ids)
-    ref_ids = torch.tensor([AMINO_ACIDS.index(a) for a in reference], device=z.device)
-    best_scores, choices = logits.max(dim=-1)
-    ref_scores = logits.gather(-1, ref_ids.expand(len(z), -1)[..., None]).squeeze(-1)
-    margin = (best_scores - ref_scores).masked_fill(choices == ref_ids, -float("inf"))
-    keep = margin.topk(min(budget, margin.shape[1]), dim=1).indices
-    decoded = ref_ids.expand(len(z), -1).clone()
-    for i in range(len(z)):
-        positions = keep[i][margin[i, keep[i]] > 0]
-        decoded[i, positions] = choices[i, positions]
+    ref_ids = torch.tensor([AMINO_ACIDS.index(a) for a in reference], device=device)
+    n, length = len(z), logits.shape[1]
+    budget = min(budget, length)
+    decoded = ref_ids.expand(n, -1).clone()
+    frozen_mask = torch.zeros(length, dtype=torch.bool, device=device)
+    for position in frozen:
+        if 0 <= position < length:
+            frozen_mask[position] = True
+
+    if temperature <= 0:
+        # Exclude the reference residue so "best" always means a real substitution.
+        masked = logits.scatter(-1, ref_ids.expand(n, -1)[..., None], -float("inf"))
+        alt_scores, alt_choices = masked.max(dim=-1)
+        ref_scores = logits.gather(-1, ref_ids.expand(n, -1)[..., None]).squeeze(-1)
+        margin = (alt_scores - ref_scores).masked_fill(frozen_mask, -float("inf"))
+        keep = margin.topk(budget, dim=1).indices
+        for i in range(n):
+            positions = keep[i] if exact else keep[i][margin[i, keep[i]] > 0]
+            decoded[i, positions] = alt_choices[i, positions]
+    else:
+        # A sample whose latent diverged (large --cfg-weight or --reward-eta can do
+        # this) produces non-finite logits. Sanitize rather than crash: the run
+        # already warns about diverged latents, and one bad sample should not take
+        # the whole batch down.
+        scaled = torch.nan_to_num(logits / temperature, nan=0.0,
+                                  posinf=30.0, neginf=-30.0)
+        probs = torch.softmax(scaled, dim=-1)
+        p_ref = probs.gather(-1, ref_ids.expand(n, -1)[..., None]).squeeze(-1)
+        # Prefer positions the model is least sure about; never pick a frozen one.
+        weight = (1.0 - p_ref).clamp_min(1e-6).masked_fill(frozen_mask, 0.0)
+        weight = torch.nan_to_num(weight, nan=1e-6).clamp_min(0.0)
+        # multinomial without replacement needs at least `budget` positive weights
+        # in every row; fall back to replacement if some row is degenerate.
+        eligible = int((weight > 0).sum(dim=1).min())
+        positions = torch.multinomial(weight, budget,
+                                      replacement=budget > eligible)
+        if exact:
+            # Zero the reference residue at every position and renormalize, so a
+            # draw at a chosen position is always a substitution.
+            alt = scaled.scatter(-1, ref_ids.expand(n, -1)[..., None], -float("inf"))
+            drawn = torch.distributions.Categorical(logits=alt).sample()
+        else:
+            drawn = torch.distributions.Categorical(logits=scaled).sample()
+        decoded.scatter_(1, positions, drawn.gather(1, positions))
+
     return ["".join(AMINO_ACIDS[i] for i in row) for row in decoded.cpu().tolist()]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Oracle scoring
+# ══════════════════════════════════════════════════════════════════════════════
+
+def load_brightness_oracle(path: Path):
+    """Load a fitted oracle from embedding_oracle.py, or return None.
+
+    Kept optional and lazily imported: the METL backend pulls in the metl
+    repository and its dependencies, which the toy peptide runs do not need.
+    """
+    if path is None or not Path(path).is_file():
+        return None
+    try:
+        import embedding_oracle
+        oracle = embedding_oracle.load_oracle(Path(path))
+    except Exception as exc:
+        print(f"  [skip] could not load oracle {path}: {type(exc).__name__}: {exc}")
+        return None
+    print(f"  Oracle: {oracle[3]} backend from {Path(path).name}")
+    return oracle
+
+
+def score_with_oracle(sequences, oracle):
+    """Predicted brightness for decoded sequences, or None if no oracle."""
+    if oracle is None:
+        return None
+    import embedding_oracle
+    return embedding_oracle.score_sequences(list(sequences), oracle)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -398,11 +489,17 @@ def save_results(out_dir: Path, method: str, latents: dict, model, reward_model,
     method_dir = out_dir / method
     method_dir.mkdir(parents=True, exist_ok=True)
     for name, latent in latents.items():
-        fasta = "".join(f">{name}_{i+1}\n{seq}\n"
-                        for i, seq in enumerate(latent["sequences"]))
+        scores = latent.get("oracle")
+        fasta = "".join(
+            f">{name}_{i+1}"
+            + (f" oracle_brightness={scores[i]:+.4f}" if scores is not None else "")
+            + f"\n{seq}\n"
+            for i, seq in enumerate(latent["sequences"]))
         (method_dir / f"{name}.fasta").write_text(fasta)
     torch.save({
         "standardized_latents": {k: v["latent"].cpu() for k, v in latents.items()},
+        "sequences":    {k: v["sequences"] for k, v in latents.items()},
+        "oracle_brightness": {k: v.get("oracle") for k, v in latents.items()},
         "model":        model.state_dict(),
         "reward_model": reward_model.state_dict(),
         "stats":        stats,
@@ -451,6 +548,51 @@ def main():
                              "pure noise. S in (0,1]: 0.3 keeps the reference largely intact, "
                              "1.0 is the unanchored baseline. Requires --reference or "
                              "--mut-budget (which supplies the consensus reference).")
+    parser.add_argument("--hidden", type=int, default=HIDDEN, metavar="H",
+                        help=f"Width of the velocity/noise network (default: {HIDDEN}). "
+                             "The network maps length*dim -> H -> H -> length*dim, so H "
+                             "caps the rank of the learned field. At 237x320 the default "
+                             "compresses 75,840 dimensions to 128, which may be what "
+                             "limits GFP; the 64-sequence teaching set it was chosen for "
+                             "is only 7,680.")
+    parser.add_argument("--exact-mutations", action="store_true",
+                        help="Give every sample exactly --mut-budget substitutions "
+                             "instead of at most that many. Without it the budget is a "
+                             "ceiling and the reference residue usually wins the draw, "
+                             "so a budget of 5 yields ~1.5 substitutions and ~18% of "
+                             "samples are the unmutated reference. Fixing the count "
+                             "makes mutational distance a controlled variable.")
+    parser.add_argument("--decode-temperature", type=float, default=0.0, metavar="T",
+                        help="Sampling temperature for decoding (default: 0 = argmax). "
+                             "Argmax is deterministic and collapses on this data: the "
+                             "reference residue is the mode almost everywhere, so many "
+                             "different latents decode to the same few sequences. T=0.7 "
+                             "restores diversity at an unchanged Hamming distance.")
+    parser.add_argument("--freeze-positions", default="", metavar="LIST",
+                        help="Comma-separated 0-indexed positions never to substitute, "
+                             "e.g. '0'. The avGFP wild type here omits the initiator "
+                             "methionine, so ESM puts one back at position 0 and that "
+                             "substitution otherwise dominates every sample.")
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE, metavar="N",
+                        help=f"Training minibatch size (default: {BATCH_SIZE}). The "
+                             "default suits the 64-sequence teaching set; at tens of "
+                             "thousands of sequences it leaves the GPU mostly idle and "
+                             "128-256 trains several times faster per epoch.")
+    parser.add_argument("--cfg-weight", type=float, default=2.0, metavar="W",
+                        help="Classifier-free guidance weight for the 'cfg' mode "
+                             "(default: 2.0, tuned on a 24x320 latent). A 237x320 "
+                             "latent has a much larger norm, so this usually needs "
+                             "raising before guidance changes the decoded output.")
+    parser.add_argument("--reward-eta", type=float, default=1.0, metavar="ETA",
+                        help="Reward-gradient strength for the 'single' and 'multi' "
+                             "modes (default: 1.0). Same caveat as --cfg-weight.")
+    parser.add_argument("--oracle", type=Path, default=None, metavar="NPZ",
+                        help="Fitted brightness oracle from embedding_oracle.py. "
+                             "Defaults to data/avgfp_metl_oracle.npz when it exists. "
+                             "Scores every decoded sample; never touches guidance, so "
+                             "it stays an independent judge. Use --no-oracle to skip.")
+    parser.add_argument("--no-oracle", action="store_true",
+                        help="Do not score samples, even if an oracle file is present.")
     parser.add_argument("--cache-dir",  type=Path, default=None,
                         help="Shared HuggingFace weight cache. Default: $ESM2_CACHE, "
                              "else project1_eval/cache/ (one copy per model, reused by all runs).")
@@ -481,6 +623,8 @@ def main():
     print(f"  Run tag     : {run_tag}")
     print(f"  Output dir  : {out_root}")
     print(f"  Device      : {DEVICE}")
+    print(f"  Guidance    : cfg w={args.cfg_weight}  reward eta={args.reward_eta}")
+    print(f"  Batch size  : {args.batch_size}   hidden width: {args.hidden}")
 
     torch.manual_seed(7)
     if DEVICE.type == "cpu":
@@ -504,12 +648,20 @@ def main():
             parser.error(f"reference has {len(reference)} residues, expected {length}")
         source = "supplied" if args.reference else "consensus"
 
+    frozen = tuple(int(x) for x in args.freeze_positions.replace(",", " ").split())
     if args.mut_budget is None:
         decode_fn = lambda z: decode(z, esm, tokenizer, stats, args.min_polar)
     else:
-        print(f"  Decoding with a {args.mut_budget}-substitution budget from the "
+        rule = ("argmax" if args.decode_temperature <= 0
+                else f"sampled at T={args.decode_temperature}")
+        rule += ", exactly" if args.exact_mutations else ", at most"
+        print(f"  Decoding {rule} {args.mut_budget} substitutions from the "
               f"{source} reference")
-        decode_fn = lambda z: decode_budget(z, esm, tokenizer, stats, reference, args.mut_budget)
+        if frozen:
+            print(f"  Frozen positions (never substituted): {list(frozen)}")
+        decode_fn = lambda z: decode_budget(z, esm, tokenizer, stats, reference,
+                                            args.mut_budget, args.decode_temperature,
+                                            frozen, args.exact_mutations)
 
     anchor = None
     if args.anchor_strength is not None:
@@ -521,6 +673,20 @@ def main():
     anchor_kwargs = {} if anchor is None else {"anchor": anchor,
                                                "strength": args.anchor_strength}
 
+    default_oracle = ROOT / "data" / "avgfp_metl_oracle.npz"
+    oracle_path = None if args.no_oracle else (args.oracle or
+                  (default_oracle if default_oracle.is_file() else None))
+    oracle = load_brightness_oracle(oracle_path)
+    if oracle is not None and len(oracle[2]) != length:
+        # The oracle is fitted to one protein at one length. Silently scoring a
+        # different one would produce confident nonsense.
+        print(f"  [skip] oracle was fitted on a {len(oracle[2])}-residue protein but "
+              f"these sequences are {length}; not scoring")
+        oracle, oracle_path = None, None
+    if oracle is None and not args.no_oracle and oracle_path is not None:
+        print("  No brightness oracle loaded; samples will not be scored. "
+              "Fit one with: python embedding_oracle.py --fit --backend metl")
+
     run_config = {
         "dataset":         str(args.dataset),
         "esm_model":       args.esm_model,
@@ -529,12 +695,34 @@ def main():
         "max_length":      args.max_length,
         "decode":          "mut_budget" if args.mut_budget is not None else "min_polar",
         "mut_budget":      args.mut_budget,
+        "decode_temperature": args.decode_temperature,
+        "exact_mutations":    args.exact_mutations,
+        "freeze_positions":   list(frozen),
         "min_polar":       args.min_polar,
         "reference":       reference,
         "anchor_strength": args.anchor_strength,
+        "batch_size":      args.batch_size,
+        "hidden":          args.hidden,
+        "cfg_weight":      args.cfg_weight,
+        "reward_eta":      args.reward_eta,
+        "oracle":          str(oracle_path) if oracle_path else None,
     }
 
-    def report(name, seqs):
+    def report(name, seqs, scores=None, latent=None):
+        unique = len(set(seqs))
+        print(f"    distinct sequences {unique}/{len(seqs)}"
+              + ("   <- collapsed; raise --decode-temperature" if unique < len(seqs) // 5
+                 else ""))
+        if latent is not None:
+            norms = latent.reshape(len(latent), -1).norm(dim=1)
+            diverged = int((norms > 3 * norms.median()).sum())
+            if diverged:
+                print(f"    {diverged} sample(s) numerically diverged "
+                      f"(latent norm up to {norms.max():.0f} vs median "
+                      f"{norms.median():.0f}); lower --cfg-weight/--reward-eta")
+        if scores is not None:
+            print(f"    oracle brightness  mean {scores.mean():+.3f}   "
+                  f"best {scores.max():+.3f}   worst {scores.min():+.3f}")
         if reference is None:
             proxies = composition_proxies(seqs)
             print(f"  {name}: {seqs[0][:48]}...  "
@@ -547,23 +735,24 @@ def main():
                   f"(min {min(distances)}, max {max(distances)})")
 
     guidance_configs = {
-        "cfg":    dict(c=1, w=2.0,  eta=0.0, lambdas=(1., 0.)),
-        "single": dict(c=1, w=0.0,  eta=1.0, lambdas=(1., 0.)),
-        "multi":  dict(c=1, w=0.0,  eta=1.0, lambdas=(0.7, 0.3)),
+        "cfg":    dict(c=1, w=args.cfg_weight, eta=0.0,            lambdas=(1., 0.)),
+        "single": dict(c=1, w=0.0,             eta=args.reward_eta, lambdas=(1., 0.)),
+        "multi":  dict(c=1, w=0.0,             eta=args.reward_eta, lambdas=(0.7, 0.3)),
     }
 
     # ── Flow matching ─────────────────────────────────────────────────────────
     print("\nTraining flow matching model...")
     torch.manual_seed(7)
-    flow_model, flow_reward, flow_losses = train_flow(dataset, args.epochs)
+    flow_model, flow_reward, flow_losses = train_flow(dataset, args.epochs, args.batch_size, args.hidden)
 
     print("\nSampling (flow)...")
     flow_latents = {}
     for name, cfg in guidance_configs.items():
         z    = sample_flow(flow_model, flow_reward, n=args.samples, **cfg, **anchor_kwargs)
         seqs = decode_fn(z)
-        report(name, seqs)
-        flow_latents[name] = {"latent": z, "sequences": seqs}
+        scores = score_with_oracle(seqs, oracle)
+        report(name, seqs, scores, z)
+        flow_latents[name] = {"latent": z, "sequences": seqs, "oracle": scores}
     save_results(out_root, "flow", flow_latents, flow_model, flow_reward,
                  stats, model_info["hf_id"], length, dim, args.min_polar, flow_losses,
                  run_config)
@@ -572,7 +761,7 @@ def main():
     print("\nTraining diffusion model...")
     torch.manual_seed(7)
     diff_model, diff_reward, diff_losses, alpha_bars, betas, alphas, post_vars = \
-        train_diffusion(dataset, args.epochs)
+        train_diffusion(dataset, args.epochs, args.batch_size, args.hidden)
 
     print("\nSampling (diffusion)...")
     diff_latents = {}
@@ -580,13 +769,44 @@ def main():
         z    = sample_diffusion(diff_model, diff_reward, alpha_bars, betas, alphas, post_vars,
                                 n=args.samples, **cfg, **anchor_kwargs)
         seqs = decode_fn(z)
-        report(name, seqs)
-        diff_latents[name] = {"latent": z, "sequences": seqs}
+        scores = score_with_oracle(seqs, oracle)
+        report(name, seqs, scores, z)
+        diff_latents[name] = {"latent": z, "sequences": seqs, "oracle": scores}
     save_results(out_root, "diffusion", diff_latents, diff_model, diff_reward,
                  stats, model_info["hf_id"], length, dim, args.min_polar, diff_losses,
                  run_config)
 
     print(f"\nDone. Results in {out_root}/")
+
+    # ── Oracle comparison ────────────────────────────────────────────────────
+    if oracle is not None:
+        print("\nOracle brightness by method and guidance mode "
+              "(wild-type centered, higher is better)")
+        header = (f"  {'method':<12}{'mode':<9}{'mean':>9}{'best':>9}"
+                  f"{'hamming':>9}{'uniq':>7}")
+        print(header + "\n  " + "-" * (len(header) - 2))
+        for method, latents in (("flow", flow_latents), ("diffusion", diff_latents)):
+            for name, latent in latents.items():
+                scores = latent["oracle"]
+                if reference is None:
+                    distance = float("nan")
+                else:
+                    distance = float(np.mean([sum(a != b for a, b in zip(s, reference))
+                                              for s in latent["sequences"]]))
+                print(f"  {method:<12}{name:<9}{scores.mean():>9.3f}"
+                      f"{scores.max():>9.3f}{distance:>9.1f}"
+                      f"{len(set(latent['sequences'])):>4}/{len(latent['sequences'])}")
+        identical = all(
+            latents[m]["sequences"] == latents[list(latents)[0]]["sequences"]
+            for latents in (flow_latents, diff_latents) for m in latents)
+        if identical:
+            print("\n  Warning: every guidance mode decoded to the same sequences. "
+                  "Guidance is not\n  changing the output — raise the CFG weight w and "
+                  "the reward weight eta.\n  Both defaults were tuned on a 24x320 latent; "
+                  "this one is much larger.")
+        print("\n  For the random-variant control and the full metric table, run:")
+        print(f"    python gfp_metrics.py --run-dir {out_root} \\")
+        print(f"        --embedding-oracle {oracle_path} --baseline-n 50")
 
     # ── Optional plots ────────────────────────────────────────────────────────
     if args.plot or args.ablate:
