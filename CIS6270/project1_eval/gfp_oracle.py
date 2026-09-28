@@ -125,10 +125,25 @@ def score_sequences(sequences: list[str], oracle=None, clip: bool = True) -> np.
 
 
 def in_domain(sequences: list[str], oracle=None) -> np.ndarray:
-    """True where a sequence is within the mutation count the oracle was fit on."""
-    _, _, wt, domain = oracle if oracle is not None else load_oracle()
-    return np.asarray([sum(a != b for a, b in zip(wt, s)) <= domain["max_mutations"]
-                       for s in sequences])
+    """True where the oracle can actually score a sequence.
+
+    Two conditions, both necessary. The mutation count must be within the range
+    the oracle saw, and EVERY substitution must be one the assay measured: an
+    indicator oracle has a zero coefficient for anything else, so an unmeasured
+    substitution contributes nothing and the prediction silently falls back to
+    the intercept. Checking only the count reports such sequences as in-domain
+    when the oracle is really returning a constant for them.
+    """
+    coef, _, wt, domain = oracle if oracle is not None else load_oracle()
+    support = {(p, AMINO_ACIDS[a])
+               for p in range(len(wt)) for a in range(len(AMINO_ACIDS))
+               if abs(float(coef[p * len(AMINO_ACIDS) + a])) > 1e-9}
+    out = []
+    for s in sequences:
+        subs = [(p, b) for p, (a, b) in enumerate(zip(wt, s)) if a != b]
+        out.append(len(subs) <= domain["max_mutations"]
+                   and all(x in support for x in subs))
+    return np.asarray(out)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
