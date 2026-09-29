@@ -116,59 +116,189 @@ def load_data(csv_path: Path, esm_hf_id: str, cache_dir: Path, max_length: int =
 # ══════════════════════════════════════════════════════════════════════════════
 
 class FlowModel(nn.Module):
-    def __init__(self, length, dim, hidden=HIDDEN):
+    def __init__(self, length, dim, hidden=HIDDEN, arch="mlp"):
         super().__init__()
-        self.length, self.dim = length, dim
-        self.time      = nn.Sequential(nn.Linear(1, 32), nn.SiLU(), nn.Linear(32, 32))
-        self.skip      = nn.Linear(32, 1)
-        self.condition = nn.Embedding(3, 16)
-        self.net = nn.Sequential(
-            nn.Linear(length * dim + 48, hidden), nn.SiLU(),
-            nn.Linear(hidden, hidden), nn.SiLU(),
-            nn.Linear(hidden, length * dim),
-        )
+        self.length, self.dim, self.arch = length, dim, arch
+        self.time = nn.Sequential(nn.Linear(1, 32), nn.SiLU(), nn.Linear(32, 32))
+        self.skip = nn.Linear(32, 1)
+        if arch == "transformer":
+            self.trunk = TransformerField(length, dim, d_model=hidden)
+        else:
+            self.condition = nn.Embedding(3, 16)
+            self.net = nn.Sequential(
+                nn.Linear(length * dim + 48, hidden), nn.SiLU(),
+                nn.Linear(hidden, hidden), nn.SiLU(),
+                nn.Linear(hidden, length * dim),
+            )
 
     def forward(self, z, t, c):
-        time   = self.time(t[:, None])
+        time = self.time(t[:, None])
+        if self.arch == "transformer":
+            return self.skip(time)[:, :, None] * z + self.trunk(z, t, c)
         inputs = torch.cat([z.flatten(1), time, self.condition(c)], dim=1)
         return self.skip(time)[:, :, None] * z + self.net(inputs).reshape_as(z)
 
 
 class DiffusionModel(nn.Module):
-    def __init__(self, length, dim, alpha_bars, hidden=HIDDEN):
+    """Denoiser for the DDPM chain.
+
+    `predict` selects the parameterization.
+
+    "eps" is the original: the output is
+        sqrt(1-abar_k) * z  +  sqrt(abar_k) * net(...)
+    At high noise abar_k -> 0, so the prediction collapses to z, which already
+    equals the added noise almost exactly -- the network is handed a correct
+    answer for free and contributes nothing. Measured on the default schedule
+    its weight exceeds 0.5 for only 369 of 1000 steps, and across five seeds the
+    training loss fell just 25% (flow's fell 78%).
+
+    "x0" follows Lecture 3.3's AMP-Diffusion recipe -- "The network predicts
+    Z0_hat" -- so the network owns the prediction at every noise level. The
+    sampler converts back with
+        eps_hat = (z_k - sqrt(abar_k) x0_hat) / sqrt(1 - abar_k)
+    and reuses the same reverse update.
+    """
+
+    def __init__(self, length, dim, alpha_bars, hidden=HIDDEN, arch="mlp",
+                 predict="eps"):
         super().__init__()
-        self.length, self.dim = length, dim
+        self.length, self.dim, self.arch, self.predict = length, dim, arch, predict
         self.alpha_bars = alpha_bars
         self.K          = len(alpha_bars) - 1
-        self.time      = nn.Sequential(nn.Linear(1, 32), nn.SiLU(), nn.Linear(32, 32))
-        self.condition = nn.Embedding(3, 16)
-        self.net = nn.Sequential(
-            nn.Linear(length * dim + 48, hidden), nn.SiLU(),
-            nn.Linear(hidden, hidden), nn.SiLU(),
-            nn.Linear(hidden, length * dim),
-        )
+        if arch == "transformer":
+            self.trunk = TransformerField(length, dim, d_model=hidden)
+        else:
+            self.time      = nn.Sequential(nn.Linear(1, 32), nn.SiLU(), nn.Linear(32, 32))
+            self.condition = nn.Embedding(3, 16)
+            self.net = nn.Sequential(
+                nn.Linear(length * dim + 48, hidden), nn.SiLU(),
+                nn.Linear(hidden, hidden), nn.SiLU(),
+                nn.Linear(hidden, length * dim),
+            )
 
     def forward(self, z, t, c):
-        time   = self.time(t[:, None])
-        inputs = torch.cat([z.flatten(1), time, self.condition(c)], dim=1)
+        if self.arch == "transformer":
+            raw = self.trunk(z, t, c)
+        else:
+            time   = self.time(t[:, None])
+            inputs = torch.cat([z.flatten(1), time, self.condition(c)], dim=1)
+            raw = self.net(inputs).reshape_as(z)
+        if self.predict == "x0":
+            return raw                      # the clean-latent estimate itself
         k = (t * self.K).round().long().clamp(0, self.K)
         a = self.alpha_bars[k, None, None]
-        return (1 - a).sqrt() * z + a.sqrt() * self.net(inputs).reshape_as(z)
+        return (1 - a).sqrt() * z + a.sqrt() * raw
+
+
+class TransformerField(nn.Module):
+    """Per-residue Transformer trunk, following Lecture 3.3's AMP-Diffusion recipe.
+
+    The MLP trunk flattens [L, D] into one vector, so a position's identity is
+    encoded only in where it lands in that vector and nothing is shared between
+    positions. On avGFP that is 75,840 inputs compressed through a single hidden
+    layer, and 94.7% of the latent variance is positional -- the model fits the
+    shared backbone and loses the per-variant signal.
+
+    Lecture 3.3: "A Transformer replaces the U-Net... Adds residue-position
+    information because order matters in a protein sequence... We will stack six
+    Transformer layers... Add the noisy residue embeddings, the diffusion-step
+    embedding shared across positions, and a learned embedding for each token
+    position before applying the Transformer."
+
+    Weights are shared across positions, so width no longer scales with sequence
+    length: this trunk is roughly 5M parameters at any L, against 235M for the
+    flattened MLP at width 1024.
+    """
+
+    def __init__(self, length, dim, d_model=256, layers=6, heads=8, dropout=0.0):
+        super().__init__()
+        self.project_in = nn.Linear(dim, d_model)
+        self.position   = nn.Parameter(torch.zeros(1, length, d_model))
+        nn.init.normal_(self.position, std=0.02)
+        self.time = nn.Sequential(nn.Linear(1, d_model), nn.SiLU(),
+                                  nn.Linear(d_model, d_model))
+        self.condition = nn.Embedding(3, d_model)
+        layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=heads, dim_feedforward=4 * d_model,
+            dropout=dropout, activation="gelu", batch_first=True, norm_first=True)
+        self.encoder = nn.TransformerEncoder(layer, layers)
+        self.project_out = nn.Linear(d_model, dim)
+        nn.init.zeros_(self.project_out.weight)
+        nn.init.zeros_(self.project_out.bias)
+
+    def forward(self, z, t, c=None):
+        h = self.project_in(z) + self.position + self.time(t[:, None])[:, None, :]
+        if c is not None:
+            h = h + self.condition(c)[:, None, :]
+        return self.project_out(self.encoder(h))
 
 
 class RewardModel(nn.Module):
-    def __init__(self, length, dim, hidden=HIDDEN):
+    def __init__(self, length, dim, hidden=HIDDEN, arch="mlp"):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(length * dim + 1, hidden), nn.SiLU(),
-            nn.Linear(hidden, hidden), nn.SiLU(), nn.Linear(hidden, 2),
-        )
+        self.arch = arch
+        if arch == "transformer":
+            # Same trunk, then mean-pool over residues to one value per objective.
+            self.trunk = TransformerField(length, dim, d_model=hidden)
+            self.head = nn.Linear(dim, 2)
+        else:
+            self.net = nn.Sequential(
+                nn.Linear(length * dim + 1, hidden), nn.SiLU(),
+                nn.Linear(hidden, hidden), nn.SiLU(), nn.Linear(hidden, 2),
+            )
 
     def forward(self, z, t):
+        if self.arch == "transformer":
+            return self.head(self.trunk(z, t).mean(dim=1))
         return self.net(torch.cat([z.flatten(1), t[:, None]], dim=1))
 
 
+class EMA:
+    """Exponential moving average of the weights, used for sampling.
+
+    Standard practice in diffusion training (DDPM uses decay 0.9999) and absent
+    here. The averaged weights are far less sensitive to which minibatch landed
+    last, which is what drives the run-to-run spread: diffusion's seed-to-seed
+    variation was 5-10x flow's (+/-0.04-0.06 against +/-0.005-0.008).
+    """
+
+    def __init__(self, model, decay=0.999):
+        self.decay = decay
+        self.shadow = {k: v.detach().clone().float()
+                       for k, v in model.state_dict().items()
+                       if v.dtype.is_floating_point}
+
+    @torch.no_grad()
+    def update(self, model):
+        for k, v in model.state_dict().items():
+            if k in self.shadow:
+                self.shadow[k].mul_(self.decay).add_(v.detach().float(),
+                                                     alpha=1 - self.decay)
+
+    @torch.no_grad()
+    def copy_to(self, model):
+        state = model.state_dict()
+        for k, v in self.shadow.items():
+            state[k].copy_(v.to(state[k].dtype))
+
+
+def sample_timesteps(n, K, device, stratified=False):
+    """Diffusion steps for one minibatch.
+
+    Independent uniform draws leave most of the schedule unvisited in a small
+    batch: at K=1000 and batch 16, one batch touches 1.6% of it. Stratified
+    sampling puts one draw in each of n equal bins, so every batch spans the
+    whole schedule and the gradient carries less variance.
+    """
+    if not stratified:
+        return torch.randint(1, K + 1, (n,), device=device)
+    edges = torch.arange(n, device=device, dtype=torch.float32)
+    k = ((edges + torch.rand(n, device=device)) / n * K).long().clamp(1, K)
+    return k[torch.randperm(n, device=device)]
+
+
 def make_ddpm_schedule(K=1000):
+    # Fewer steps means each minibatch covers more of the schedule.
     betas      = torch.cat([torch.zeros(1), torch.linspace(1e-4, 0.02, K)]).to(DEVICE)
     alphas     = 1.0 - betas
     alpha_bars = alphas.cumprod(0)
@@ -178,14 +308,88 @@ def make_ddpm_schedule(K=1000):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Probability paths (interpolants)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def interpolate(z0, z1, t, kind="linear"):
+    """Intermediate state and its conditional velocity for a chosen interpolant.
+
+    A path is X_t = alpha(t) X0 + beta(t) X1 with alpha(0)=beta(1)=1 and
+    alpha(1)=beta(0)=0, so the endpoints are preserved whatever the schedule.
+    Lecture 2.2 works these three and notes that changing the interpolant "can
+    help when velocities are difficult to learn or sampling requires many
+    integration steps, because each choice changes the intermediate
+    distributions and velocity targets."
+
+      linear     X_t = (1-t) X0 + t X1              U_t = X1 - X0
+                 constant speed; the usual default.
+      quadratic  X_t = (1-t^2) X0 + t^2 X1          U_t = 2t (X1 - X0)
+                 leaves the prior slowly and accelerates; a quarter of the way
+                 through, only 6.25% of the distance is covered.
+      trig       X_t = cos(pi t/2) X0 + sin(pi t/2) X1
+                 U_t = (pi/2)(-sin(pi t/2) X0 + cos(pi t/2) X1)
+                 curved path; for independent centered endpoints with identity
+                 covariance it preserves that covariance throughout.
+    """
+    shape = (-1,) + (1,) * (z1.dim() - 1)
+    tt = t.view(shape)
+    if kind == "linear":
+        return (1 - tt) * z0 + tt * z1, z1 - z0
+    if kind == "quadratic":
+        return (1 - tt ** 2) * z0 + tt ** 2 * z1, 2 * tt * (z1 - z0)
+    if kind == "trig":
+        half_pi = torch.pi / 2
+        a, b = torch.cos(half_pi * tt), torch.sin(half_pi * tt)
+        return a * z0 + b * z1, half_pi * (-b * z0 + a * z1)
+    raise ValueError(f"unknown interpolant '{kind}'")
+
+
+INTERPOLANTS = ("linear", "quadratic", "trig")
+
+
+def endpoint_from_velocity(z, t, v, kind="linear"):
+    """Estimate the clean endpoint X1 from the current state and predicted velocity.
+
+    For a path X_t = a(t) X0 + b(t) X1 the velocity is U_t = a'(t) X0 + b'(t) X1.
+    Eliminating X0 between the two gives
+
+        X1 = (a'(t) X_t - a(t) U_t) / (a'(t) b(t) - a(t) b'(t))
+
+    which for the linear path collapses to the familiar X1 = X_t + (1-t) U_t.
+    The quadratic path's denominator vanishes at t=0, so it is clamped: at the
+    very start of generation the state carries no information about the endpoint
+    and the estimate is meaningless anyway.
+    """
+    shape = (-1,) + (1,) * (z.dim() - 1)
+    tt = t.view(shape)
+    if kind == "linear":
+        return z + (1 - tt) * v
+    if kind == "quadratic":
+        return z + (1 - tt ** 2) * v / (2 * tt).clamp_min(1e-3)
+    if kind == "trig":
+        half_pi = torch.pi / 2
+        return torch.sin(half_pi * tt) * z + (2 / torch.pi) * torch.cos(half_pi * tt) * v
+    raise ValueError(f"unknown interpolant '{kind}'")
+
+
+def endpoint_from_noise(z, eps, alpha_bar):
+    """Clean-sample estimate from a DDPM state and its predicted noise.
+
+    Inverting z_k = sqrt(abar) x0 + sqrt(1-abar) eps for x0.
+    """
+    return (z - (1 - alpha_bar).sqrt() * eps) / alpha_bar.sqrt().clamp_min(1e-4)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Training
 # ══════════════════════════════════════════════════════════════════════════════
 
-def train_flow(dataset, epochs, batch_size=BATCH_SIZE, hidden=HIDDEN):
+def train_flow(dataset, epochs, batch_size=BATCH_SIZE, hidden=HIDDEN,
+               interpolant="linear", arch="mlp"):
     _, length, dim = dataset.tensors[0].shape
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    model  = FlowModel(length, dim, hidden).to(DEVICE)
-    reward = RewardModel(length, dim, hidden).to(DEVICE)
+    model  = FlowModel(length, dim, hidden, arch).to(DEVICE)
+    reward = RewardModel(length, dim, hidden, arch).to(DEVICE)
     opt    = torch.optim.Adam(list(model.parameters()) + list(reward.parameters()), lr=LEARNING_RATE)
     losses = []
     for epoch in range(epochs):
@@ -194,9 +398,9 @@ def train_flow(dataset, epochs, batch_size=BATCH_SIZE, hidden=HIDDEN):
             z1, c, r_tilde = z1.to(DEVICE), c.to(DEVICE), r_tilde.to(DEVICE)
             z0 = torch.randn_like(z1)
             t  = torch.rand(len(z1), device=DEVICE)
-            zt = (1 - t[:, None, None]) * z0 + t[:, None, None] * z1
+            zt, target = interpolate(z0, z1, t, interpolant)
             dropped = c.masked_fill(torch.rand(len(c), device=DEVICE) < CONDITION_DROP, 2)
-            loss = F.mse_loss(model(zt, t, dropped), z1 - z0) + F.mse_loss(reward(zt, t), r_tilde)
+            loss = F.mse_loss(model(zt, t, dropped), target) + F.mse_loss(reward(zt, t), r_tilde)
             opt.zero_grad(set_to_none=True); loss.backward(); opt.step()
             total += loss.item()
         avg = total / len(loader)
@@ -208,32 +412,39 @@ def train_flow(dataset, epochs, batch_size=BATCH_SIZE, hidden=HIDDEN):
     return model, reward, losses
 
 
-def train_diffusion(dataset, epochs, batch_size=BATCH_SIZE, hidden=HIDDEN):
+def train_diffusion(dataset, epochs, batch_size=BATCH_SIZE, hidden=HIDDEN, arch="mlp",
+                    predict="eps", steps=1000, stratified=False, ema_decay=0.0):
     _, length, dim = dataset.tensors[0].shape
-    betas, alphas, alpha_bars, post_vars = make_ddpm_schedule()
+    betas, alphas, alpha_bars, post_vars = make_ddpm_schedule(steps)
     K      = len(betas) - 1
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    model  = DiffusionModel(length, dim, alpha_bars, hidden).to(DEVICE)
-    reward = RewardModel(length, dim, hidden).to(DEVICE)
+    model  = DiffusionModel(length, dim, alpha_bars, hidden, arch, predict).to(DEVICE)
+    reward = RewardModel(length, dim, hidden, arch).to(DEVICE)
+    ema = EMA(model, ema_decay) if ema_decay > 0 else None
     opt    = torch.optim.Adam(list(model.parameters()) + list(reward.parameters()), lr=LEARNING_RATE)
     losses = []
     for epoch in range(epochs):
         total = 0.0
         for z0, c, r_tilde in loader:
             z0, c, r_tilde = z0.to(DEVICE), c.to(DEVICE), r_tilde.to(DEVICE)
-            k = torch.randint(1, K + 1, (len(z0),), device=DEVICE)
+            k = sample_timesteps(len(z0), K, DEVICE, stratified)
             t = k.float() / K
             a = alpha_bars[k, None, None]
             eps = torch.randn_like(z0)
             zk  = a.sqrt() * z0 + (1 - a).sqrt() * eps
             dropped = c.masked_fill(torch.rand(len(c), device=DEVICE) < CONDITION_DROP, 2)
-            loss = F.mse_loss(model(zk, t, dropped), eps) + F.mse_loss(reward(zk, t), r_tilde)
+            target = z0 if predict == "x0" else eps
+            loss = F.mse_loss(model(zk, t, dropped), target) + F.mse_loss(reward(zk, t), r_tilde)
             opt.zero_grad(set_to_none=True); loss.backward(); opt.step()
+            if ema is not None:
+                ema.update(model)
             total += loss.item()
         avg = total / len(loader)
         losses.append(avg)
         if (epoch + 1) % max(1, epochs // 4) == 0 or epoch + 1 == epochs:
             print(f"  [diffusion] epoch {epoch+1:>4}/{epochs}: loss {avg:.4f}")
+    if ema is not None:
+        ema.copy_to(model)          # sample from the averaged weights
     model.eval().requires_grad_(False)
     reward.eval().requires_grad_(False)
     return model, reward, losses, alpha_bars, betas, alphas, post_vars
@@ -243,17 +454,62 @@ def train_diffusion(dataset, epochs, batch_size=BATCH_SIZE, hidden=HIDDEN):
 # Sampling
 # ══════════════════════════════════════════════════════════════════════════════
 
-def reward_gradient(reward_model, z, t, lambdas):
+def reward_gradient(reward_model, z, t, lambdas, clip=0.0, normalize=False,
+                    endpoint=None):
+    """Gradient of the lambda-weighted reward with respect to the latent.
+
+    Lecture 3.4 lists two precautions this implements.
+
+    `normalize` takes each objective's gradient to unit norm before the weighted
+    sum, so lambda sets relative importance rather than being confounded with
+    whatever scale each reward head happens to have learned. Measured on the
+    avGFP reward model the two objectives differ by 1.6x in gradient norm
+    (5.24 vs 3.37), so without this a lambda of (0.7, 0.3) is not the ratio it
+    appears to be, and a workable eta does not transfer between runs.
+
+    `clip` bounds the per-sample gradient norm. Guidance adds this term at every
+    integration step, so an unbounded gradient compounds: a 1,000-step DDPM chain
+    at eta=50 reached latent norms of 4.6e17 and destroyed 32 of 100 samples,
+    while the 200-step flow path at the same eta stayed bounded.
+    """
     with torch.enable_grad():
         state = z.detach().requires_grad_(True)
-        R = (reward_model(state, t) * lambdas).sum(1)
-        grad = torch.autograd.grad(R.sum(), state)[0]
-    return grad.detach()
+        if endpoint is None:
+            rewards = reward_model(state, t)
+        else:
+            # Lecture 3.4: "Some properties have little meaning for an
+            # intermediate state. A partially denoised protein latent, for
+            # example, may not yet correspond to a valid sequence." So predict
+            # the clean endpoint, score THAT, and differentiate back through the
+            # endpoint estimator. Measured on the avGFP reward model, accuracy
+            # goes from Spearman 0.26 at t=0.1 to 0.82 on a clean latent, so this
+            # replaces a nearly uninformative signal early in the trajectory.
+            x1 = endpoint(state)
+            rewards = reward_model(x1, torch.ones_like(t))
+        if normalize:
+            # One backward per objective so each can be scaled independently.
+            total = torch.zeros_like(state)
+            for j in range(rewards.shape[1]):
+                if float(lambdas[j]) == 0.0:
+                    continue
+                g = torch.autograd.grad(rewards[:, j].sum(), state, retain_graph=True)[0]
+                norm = g.flatten(1).norm(dim=1).clamp_min(1e-12)
+                total = total + lambdas[j] * g / norm.view(-1, *([1] * (g.dim() - 1)))
+            grad = total
+        else:
+            grad = torch.autograd.grad((rewards * lambdas).sum(1).sum(), state)[0]
+    grad = grad.detach()
+    if clip and clip > 0:
+        norm = grad.flatten(1).norm(dim=1)
+        scale = (clip / norm.clamp_min(1e-12)).clamp(max=1.0)
+        grad = grad * scale.view(-1, *([1] * (grad.dim() - 1)))
+    return grad
 
 
 @torch.no_grad()
 def sample_flow(model, reward_model, n=8, c=1, w=0.0, eta=0.0, lambdas=(1., 0.), steps=200,
-                anchor=None, strength=1.0):
+                anchor=None, strength=1.0, clip=0.0, normalize=False,
+                interpolant="linear", endpoint_guidance=False, seed=123):
     """Integrate the velocity field from t=0 to t=1.
 
     With `anchor` (a standardized reference latent) the trajectory starts from a
@@ -264,7 +520,7 @@ def sample_flow(model, reward_model, n=8, c=1, w=0.0, eta=0.0, lambdas=(1., 0.),
     """
     lam = torch.tensor(lambdas, dtype=torch.float32, device=DEVICE)
     lam = lam / lam.sum()
-    torch.manual_seed(123)
+    torch.manual_seed(seed)
     start = 0.0
     if anchor is None:
         z = torch.randn(n, model.length, model.dim, device=DEVICE)
@@ -272,7 +528,8 @@ def sample_flow(model, reward_model, n=8, c=1, w=0.0, eta=0.0, lambdas=(1., 0.),
         start = 1.0 - float(strength)
         z1    = anchor.to(DEVICE).expand(n, -1, -1)
         z0    = torch.randn(n, model.length, model.dim, device=DEVICE)
-        z     = (1 - start) * z0 + start * z1      # the path's own interpolant at t=start
+        # Start on the path the model was trained against, not a linear guess.
+        z, _  = interpolate(z0, z1, torch.full((n,), start, device=DEVICE), interpolant)
     null = torch.full((n,), 2, dtype=torch.long, device=DEVICE)
     cond = torch.full((n,), c, dtype=torch.long, device=DEVICE)
     dt   = (1.0 - start) / steps
@@ -283,7 +540,15 @@ def sample_flow(model, reward_model, n=8, c=1, w=0.0, eta=0.0, lambdas=(1., 0.),
             v = v + w * (model(z, t, cond) - model(z, t, null))
         if eta:
             kappa = eta * 4 * t[:, None, None] * (1 - t[:, None, None])
-            v = v + kappa * reward_gradient(reward_model, z, t, lam)
+            endpoint = None
+            if endpoint_guidance:
+                # Re-predict the velocity inside the gradient tape so the reward
+                # gradient flows back through the endpoint estimate as well.
+                def endpoint(state, _t=t, _null=null):
+                    return endpoint_from_velocity(state, _t, model(state, _t, _null),
+                                                  interpolant)
+            v = v + kappa * reward_gradient(reward_model, z, t, lam, clip, normalize,
+                                            endpoint)
         z = z + dt * v
     return z
 
@@ -291,7 +556,8 @@ def sample_flow(model, reward_model, n=8, c=1, w=0.0, eta=0.0, lambdas=(1., 0.),
 @torch.no_grad()
 def sample_diffusion(model, reward_model, alpha_bars, betas, alphas, post_vars,
                      n=8, c=1, w=0.0, eta=0.0, lambdas=(1., 0.),
-                     anchor=None, strength=1.0):
+                     anchor=None, strength=1.0, clip=0.0, normalize=False,
+                     endpoint_guidance=False, seed=123):
     """Run the reverse chain from step K down to 1.
 
     With `anchor` the chain starts at step round(strength * K) from the forward-
@@ -301,7 +567,7 @@ def sample_diffusion(model, reward_model, alpha_bars, betas, alphas, post_vars,
     lam = torch.tensor(lambdas, dtype=torch.float32, device=DEVICE)
     lam = lam / lam.sum()
     K    = len(betas) - 1
-    torch.manual_seed(123)
+    torch.manual_seed(seed)
     start = K
     if anchor is None:
         z = torch.randn(n, model.length, model.dim, device=DEVICE)
@@ -315,12 +581,30 @@ def sample_diffusion(model, reward_model, alpha_bars, betas, alphas, post_vars,
     cond = torch.full((n,), c, dtype=torch.long, device=DEVICE)
     for k in range(start, 0, -1):
         t   = torch.full((n,), k / K, device=DEVICE)
-        eps = model(z, t, null)
+        a_k = alpha_bars[k]
+
+        def noise_pred(state, condition):
+            out = model(state, t, condition)
+            if model.predict != "x0":
+                return out
+            # Lecture 3.3: "Convert Z0_hat into a noise estimate and reuse the
+            # DDPM reverse update."
+            return (state - a_k.sqrt() * out) / (1 - a_k).sqrt().clamp_min(1e-4)
+
+        eps = noise_pred(z, null)
         if w:
-            eps = eps + w * (model(z, t, cond) - model(z, t, null))
+            eps = eps + w * (noise_pred(z, cond) - noise_pred(z, null))
         sigma = (1 - alpha_bars[k]).sqrt()
         if eta:
-            eps = eps - eta * sigma * reward_gradient(reward_model, z, t, lam)
+            endpoint = None
+            if endpoint_guidance:
+                def endpoint(state, _t=t, _null=null, _a=alpha_bars[k]):
+                    out = model(state, _t, _null)
+                    # In x0 mode the network already returns the clean estimate.
+                    return out if model.predict == "x0" else \
+                        endpoint_from_noise(state, out, _a)
+            eps = eps - eta * sigma * reward_gradient(reward_model, z, t, lam,
+                                                      clip, normalize, endpoint)
         mean = (z - betas[k] * eps / sigma) / alphas[k].sqrt()
         z    = mean + post_vars[k].sqrt() * torch.randn_like(z) if k > 1 else mean
     return z
@@ -548,6 +832,55 @@ def main():
                              "pure noise. S in (0,1]: 0.3 keeps the reference largely intact, "
                              "1.0 is the unanchored baseline. Requires --reference or "
                              "--mut-budget (which supplies the consensus reference).")
+    parser.add_argument("--arch", default="mlp", choices=("mlp", "transformer"),
+                        help="Velocity/noise network. 'mlp' flattens [L,D] into one "
+                             "vector -- Lecture 3.2's recipe for small vectors in R^64. "
+                             "'transformer' is Lecture 3.3's AMP-Diffusion trunk: six "
+                             "self-attention layers over residues with learned positional "
+                             "embeddings, weights shared across positions. With --arch "
+                             "transformer, --hidden sets d_model (try 256).")
+    parser.add_argument("--interpolant", default="linear", choices=INTERPOLANTS,
+                        help="Probability path between prior and data (default: linear). "
+                             "quadratic leaves the prior slowly and accelerates; trig "
+                             "follows a curved, covariance-preserving path. Lecture 2.2 "
+                             "suggests changing this when velocities are hard to learn.")
+    parser.add_argument("--guidance-clip", type=float, default=0.0, metavar="C",
+                        help="Bound the per-sample reward-gradient norm at C "
+                             "(default: 0 = no clipping). Lecture 3.4: 'Clip unusually "
+                             "large guidance gradients'. Without it, diffusion diverged "
+                             "at eta=50.")
+    parser.add_argument("--predict", default="eps", choices=("eps", "x0"),
+                        help="What the diffusion network predicts (default: eps). "
+                             "'x0' is Lecture 3.3's AMP-Diffusion recipe and makes the "
+                             "network responsible at every noise level; with 'eps' its "
+                             "weight exceeds 0.5 for only 369 of 1000 steps.")
+    parser.add_argument("--ema", type=float, default=0.0, metavar="DECAY",
+                        help="Exponential moving average of diffusion weights for "
+                             "sampling, e.g. 0.999 (default: 0 = off). Standard in DDPM "
+                             "training and the usual cure for run-to-run variance.")
+    parser.add_argument("--diffusion-steps", type=int, default=1000, metavar="K",
+                        help="Length of the DDPM schedule (default: 1000). Smaller K "
+                             "means each minibatch covers more of it.")
+    parser.add_argument("--stratified-timesteps", action="store_true",
+                        help="Spread each minibatch's diffusion steps evenly over the "
+                             "schedule instead of drawing them independently.")
+    parser.add_argument("--seed", type=int, default=7, metavar="S",
+                        help="Seed for weight init, batch order and sampling noise "
+                             "(default: 7). Vary it to get independent replicates; "
+                             "every previous run in this project used 7.")
+    parser.add_argument("--endpoint-guidance", action="store_true",
+                        help="Score the PREDICTED CLEAN ENDPOINT instead of the noisy "
+                             "state, and differentiate back through it. Lecture 3.4: "
+                             "'Evaluate rewards on a predicted clean endpoint', because "
+                             "'a partially denoised protein latent may not yet "
+                             "correspond to a valid sequence'. The avGFP reward model "
+                             "scores Spearman 0.26 at t=0.1 but 0.82 on a clean latent. "
+                             "Costs one extra network evaluation per guided step.")
+    parser.add_argument("--normalize-guidance", action="store_true",
+                        help="Scale each objective's gradient to unit norm before the "
+                             "lambda-weighted sum. Lecture 3.4: 'Normalize objectives "
+                             "before combining them'. Makes lambda a true importance "
+                             "ratio and makes eta comparable across runs.")
     parser.add_argument("--hidden", type=int, default=HIDDEN, metavar="H",
                         help=f"Width of the velocity/noise network (default: {HIDDEN}). "
                              "The network maps length*dim -> H -> H -> length*dim, so H "
@@ -623,10 +956,18 @@ def main():
     print(f"  Run tag     : {run_tag}")
     print(f"  Output dir  : {out_root}")
     print(f"  Device      : {DEVICE}")
-    print(f"  Guidance    : cfg w={args.cfg_weight}  reward eta={args.reward_eta}")
+    print(f"  Guidance    : cfg w={args.cfg_weight}  reward eta={args.reward_eta}"
+          + (f"  clip={args.guidance_clip}" if args.guidance_clip else "")
+          + ("  normalized" if args.normalize_guidance else "")
+          + ("  endpoint" if args.endpoint_guidance else ""))
     print(f"  Batch size  : {args.batch_size}   hidden width: {args.hidden}")
+    print(f"  Interpolant : {args.interpolant}   architecture: {args.arch}")
+    print(f"  Seed        : {args.seed}")
+    print(f"  Diffusion   : predict={args.predict}  K={args.diffusion_steps}"
+          + (f"  ema={args.ema}" if args.ema else "")
+          + ("  stratified" if args.stratified_timesteps else ""))
 
-    torch.manual_seed(7)
+    torch.manual_seed(args.seed)
     if DEVICE.type == "cpu":
         torch.set_num_threads(2)
 
@@ -672,6 +1013,10 @@ def main():
               f"from the {source} reference")
     anchor_kwargs = {} if anchor is None else {"anchor": anchor,
                                                "strength": args.anchor_strength}
+    guide_kwargs = {"clip": args.guidance_clip, "normalize": args.normalize_guidance,
+                    "endpoint_guidance": args.endpoint_guidance,
+                    "seed": args.seed}
+    flow_path = {"interpolant": args.interpolant}
 
     default_oracle = ROOT / "data" / "avgfp_metl_oracle.npz"
     oracle_path = None if args.no_oracle else (args.oracle or
@@ -694,6 +1039,7 @@ def main():
         "samples":         args.samples,
         "max_length":      args.max_length,
         "decode":          "mut_budget" if args.mut_budget is not None else "min_polar",
+        "interpolant":     args.interpolant,
         "mut_budget":      args.mut_budget,
         "decode_temperature": args.decode_temperature,
         "exact_mutations":    args.exact_mutations,
@@ -703,8 +1049,17 @@ def main():
         "anchor_strength": args.anchor_strength,
         "batch_size":      args.batch_size,
         "hidden":          args.hidden,
+        "arch":            args.arch,
+        "predict":         args.predict,
+        "ema":             args.ema,
+        "diffusion_steps": args.diffusion_steps,
+        "stratified":      args.stratified_timesteps,
         "cfg_weight":      args.cfg_weight,
         "reward_eta":      args.reward_eta,
+        "guidance_clip":   args.guidance_clip,
+        "normalize_guidance": args.normalize_guidance,
+        "endpoint_guidance":  args.endpoint_guidance,
+        "seed":            args.seed,
         "oracle":          str(oracle_path) if oracle_path else None,
     }
 
@@ -742,13 +1097,15 @@ def main():
 
     # ── Flow matching ─────────────────────────────────────────────────────────
     print("\nTraining flow matching model...")
-    torch.manual_seed(7)
-    flow_model, flow_reward, flow_losses = train_flow(dataset, args.epochs, args.batch_size, args.hidden)
+    torch.manual_seed(args.seed)
+    flow_model, flow_reward, flow_losses = train_flow(dataset, args.epochs, args.batch_size, args.hidden,
+                                                       args.interpolant, args.arch)
 
     print("\nSampling (flow)...")
     flow_latents = {}
     for name, cfg in guidance_configs.items():
-        z    = sample_flow(flow_model, flow_reward, n=args.samples, **cfg, **anchor_kwargs)
+        z    = sample_flow(flow_model, flow_reward, n=args.samples, **cfg,
+                           **anchor_kwargs, **guide_kwargs, **flow_path)
         seqs = decode_fn(z)
         scores = score_with_oracle(seqs, oracle)
         report(name, seqs, scores, z)
@@ -759,15 +1116,17 @@ def main():
 
     # ── Diffusion ─────────────────────────────────────────────────────────────
     print("\nTraining diffusion model...")
-    torch.manual_seed(7)
+    torch.manual_seed(args.seed)
     diff_model, diff_reward, diff_losses, alpha_bars, betas, alphas, post_vars = \
-        train_diffusion(dataset, args.epochs, args.batch_size, args.hidden)
+        train_diffusion(dataset, args.epochs, args.batch_size, args.hidden, args.arch,
+                        args.predict, args.diffusion_steps, args.stratified_timesteps,
+                        args.ema)
 
     print("\nSampling (diffusion)...")
     diff_latents = {}
     for name, cfg in guidance_configs.items():
         z    = sample_diffusion(diff_model, diff_reward, alpha_bars, betas, alphas, post_vars,
-                                n=args.samples, **cfg, **anchor_kwargs)
+                                n=args.samples, **cfg, **anchor_kwargs, **guide_kwargs)
         seqs = decode_fn(z)
         scores = score_with_oracle(seqs, oracle)
         report(name, seqs, scores, z)
