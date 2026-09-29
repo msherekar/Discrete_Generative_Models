@@ -865,9 +865,14 @@ def main():
                         help="Spread each minibatch's diffusion steps evenly over the "
                              "schedule instead of drawing them independently.")
     parser.add_argument("--seed", type=int, default=7, metavar="S",
-                        help="Seed for weight init, batch order and sampling noise "
-                             "(default: 7). Vary it to get independent replicates; "
-                             "every previous run in this project used 7.")
+                        help="Seed for weight initialization and batch order "
+                             "(default: 7, the value hardcoded before this flag existed).")
+    parser.add_argument("--sample-seed", type=int, default=123, metavar="S",
+                        help="Seed for the sampling noise (default: 123, the value "
+                             "hardcoded before this flag existed). Kept separate from "
+                             "--seed so the defaults reproduce pre-flag runs exactly. "
+                             "For independent replicates vary BOTH, e.g. "
+                             "--seed 11 --sample-seed 11.")
     parser.add_argument("--endpoint-guidance", action="store_true",
                         help="Score the PREDICTED CLEAN ENDPOINT instead of the noisy "
                              "state, and differentiate back through it. Lecture 3.4: "
@@ -962,7 +967,7 @@ def main():
           + ("  endpoint" if args.endpoint_guidance else ""))
     print(f"  Batch size  : {args.batch_size}   hidden width: {args.hidden}")
     print(f"  Interpolant : {args.interpolant}   architecture: {args.arch}")
-    print(f"  Seed        : {args.seed}")
+    print(f"  Seed        : {args.seed} (train)  {args.sample_seed} (sampling)")
     print(f"  Diffusion   : predict={args.predict}  K={args.diffusion_steps}"
           + (f"  ema={args.ema}" if args.ema else "")
           + ("  stratified" if args.stratified_timesteps else ""))
@@ -1015,7 +1020,7 @@ def main():
                                                "strength": args.anchor_strength}
     guide_kwargs = {"clip": args.guidance_clip, "normalize": args.normalize_guidance,
                     "endpoint_guidance": args.endpoint_guidance,
-                    "seed": args.seed}
+                    "seed": args.sample_seed}
     flow_path = {"interpolant": args.interpolant}
 
     default_oracle = ROOT / "data" / "avgfp_metl_oracle.npz"
@@ -1060,6 +1065,7 @@ def main():
         "normalize_guidance": args.normalize_guidance,
         "endpoint_guidance":  args.endpoint_guidance,
         "seed":            args.seed,
+        "sample_seed":     args.sample_seed,
         "oracle":          str(oracle_path) if oracle_path else None,
     }
 
