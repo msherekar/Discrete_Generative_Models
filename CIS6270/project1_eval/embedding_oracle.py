@@ -231,6 +231,42 @@ def fit_oracle(sequences, scores, wt, backend, alpha=1.0, val_fraction=0.2, seed
     return model, float(rho), mae, domain, features.shape[1]
 
 
+def fit_on_splits(train, val, test, wt, backend,
+                  alphas=(0.1, 0.3, 1.0, 3.0, 10.0, 30.0)):
+    """Fit on train, choose the ridge penalty on val, report once on test.
+
+    A dense representation has no sparse support to worry about -- METL and ESM
+    embed any sequence -- so unlike the indicator oracle there is no in-support
+    subset to report. The splits still matter: the penalty has to be chosen
+    somewhere that is not the test set, and the stratified partition keeps the
+    mutation-count profile of all three slices matched to the assay.
+    """
+    train_x = encode(train[0], wt, backend)
+    val_x = encode(val[0], wt, backend)
+    print(f"  selecting the ridge penalty on {len(val[0])} validation variants")
+    tried = []
+    for alpha in alphas:
+        model = Ridge(alpha=alpha).fit(train_x, train[1])
+        predicted = model.predict(val_x)
+        tried.append((model, alpha,
+                      {"rho": float(spearmanr(predicted, val[1]).statistic),
+                       "mae": float(np.abs(predicted - val[1]).mean()),
+                       "n": len(val[0])}))
+    best = max(tried, key=lambda t: t[2]["rho"])
+    for candidate in tried:
+        _, alpha, stats = candidate
+        print(f"    alpha {alpha:>5}: val Spearman {stats['rho']:.4f}  "
+              f"MAE {stats['mae']:.4f}"
+              + ("  <-- chosen" if candidate is best else ""))
+    model, alpha, val_stats = best
+    predicted = model.predict(encode(test[0], wt, backend))
+    test_stats = {"rho": float(spearmanr(predicted, test[1]).statistic),
+                  "mae": float(np.abs(predicted - test[1]).mean()),
+                  "n": len(test[0])}
+    domain = {"score_min": float(train[1].min()), "score_max": float(train[1].max())}
+    return model, alpha, {"val": val_stats, "test": test_stats}, domain, train_x.shape[1]
+
+
 def save_oracle(path: Path, model, wt, backend, rho, mae, domain, n_features):
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(path, coef=model.coef_.astype(np.float32),
@@ -272,6 +308,14 @@ def parse_args():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--backend", default="metl",
                         help=f"metl (default) or one of: {', '.join(ESM_HF)}")
+    parser.add_argument("--train", type=Path, default=None,
+                        help="Training CSV from split_gfp.py (default: "
+                             "data/avgfp_train.csv when it exists). With --train the "
+                             "penalty is chosen on --val and reported on --test.")
+    parser.add_argument("--val", type=Path, default=None,
+                        help="Validation CSV; selects the ridge penalty.")
+    parser.add_argument("--test", type=Path, default=None,
+                        help="Test CSV; read once, for the reported accuracy.")
     parser.add_argument("--split", type=Path, default=ROOT / "data" / "avgfp_oracle.csv",
                         help="Oracle-split CSV from prepare_gfp.py")
     parser.add_argument("--wt", type=Path, default=None,
@@ -289,7 +333,34 @@ def parse_args():
 def main():
     args = parse_args()
     out = args.oracle or ROOT / "data" / f"avgfp_{args.backend}_oracle.npz"
-    if args.fit:
+    default_train = ROOT / "data" / "avgfp_train.csv"
+    if args.fit and args.train is None and default_train.is_file():
+        args.train = default_train
+        args.val = args.val or ROOT / "data" / "avgfp_val.csv"
+        args.test = args.test or ROOT / "data" / "avgfp_test.csv"
+    if args.fit and args.train is not None:
+        for name, path in (("--val", args.val), ("--test", args.test)):
+            if path is None or not path.is_file():
+                raise SystemExit(f"{name} is required with --train (got {path}). "
+                                 f"Build the splits with: python split_gfp.py")
+        wt = (args.wt or args.train.parent / "avgfp_wt.txt").read_text().strip()
+        train, val, test = (read_split(q) for q in (args.train, args.val, args.test))
+        if args.limit:
+            train = (train[0][:args.limit], train[1][:args.limit])
+        print(f"\nFitting the {args.backend} oracle on {len(train[0])} "
+              f"training variants...")
+        model, alpha, stats, domain, n_features = fit_on_splits(
+            train, val, test, wt, args.backend)
+        save_oracle(out, model, wt, args.backend, stats["val"]["rho"],
+                    stats["val"]["mae"], domain, n_features)
+        print(f"\n  representation: {n_features} features")
+        print(f"  chosen penalty alpha = {alpha}")
+        for name in ("val", "test"):
+            s = stats[name]
+            print(f"  {name:<5} n={s['n']:<6} Spearman {s['rho']:.4f}  "
+                  f"MAE {s['mae']:.4f}")
+        print(f"  saved to {out}")
+    elif args.fit:
         sequences, scores = read_split(args.split)
         if args.limit:
             sequences, scores = sequences[:args.limit], scores[:args.limit]

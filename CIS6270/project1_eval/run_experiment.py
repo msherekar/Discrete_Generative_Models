@@ -690,8 +690,18 @@ def load_support_mask(path, reference, level="substitution"):
     mask = np.zeros((length, n_aa), dtype=bool)
     if path.suffix == ".npz":
         saved = np.load(path, allow_pickle=False)
+        if "support" in saved.files:
+            # Recorded at fit time: exactly the substitutions the oracle was
+            # fitted on. Preferred over the coefficients, which on a sparse design
+            # keep small nonzero values for columns ridge never really saw.
+            mask = np.asarray(saved["support"], dtype=bool)
+            if mask.shape != (length, n_aa):
+                raise SystemExit(f"{path} records a {mask.shape} support but the "
+                                 f"reference needs {(length, n_aa)}")
+            return _finish_support(mask, reference, level)
         if "coef" not in saved:
-            raise SystemExit(f"{path} has no 'coef'; not a gfp_oracle.py oracle")
+            raise SystemExit(f"{path} has no 'coef' or 'support'; "
+                             f"not a gfp_oracle.py oracle")
         coef = np.asarray(saved["coef"], dtype=np.float64)
         if coef.size != length * n_aa:
             raise SystemExit(f"{path} has {coef.size} coefficients but reference "
@@ -713,16 +723,25 @@ def load_support_mask(path, reference, level="substitution"):
     else:
         raise SystemExit(f"--restrict-support wants a .npz or .csv, got {path.suffix}")
 
+    return _finish_support(mask, reference, level)
+
+
+def _finish_support(mask, reference, level):
+    """Drop the reference residue, apply the level, and sanity-check the result."""
+    length, n_aa = len(reference), len(AMINO_ACIDS)
+    rows = np.arange(length)
+    wt_columns = [AMINO_ACIDS.index(a) for a in reference]
     # The reference residue is not a substitution; drop it so `mask` counts only
     # real alternatives. decode_budget re-admits it as the no-mutation option.
-    mask[np.arange(length), [AMINO_ACIDS.index(a) for a in reference]] = False
+    mask = mask.copy()
+    mask[rows, wt_columns] = False
     if level == "position":
         mask = np.repeat(mask.any(axis=1, keepdims=True), n_aa, axis=1)
-        mask[np.arange(length), [AMINO_ACIDS.index(a) for a in reference]] = False
+        mask[rows, wt_columns] = False
     elif level != "substitution":
         raise SystemExit(f"unknown --support-level '{level}'")
     if not mask.any():
-        raise SystemExit(f"{path} yielded an empty support mask; wrong reference?")
+        raise SystemExit("support mask came out empty; wrong reference sequence?")
     return mask
 
 
