@@ -81,9 +81,16 @@ def load_data(csv_path: Path, esm_hf_id: str, cache_dir: Path, max_length: int =
     if len(lengths) != 1 or max(lengths) > max_length:
         raise ValueError(f"Sequences must all be the same length, at most {max_length}")
     c = torch.tensor([int(r["c"]) for r in rows], dtype=torch.long)
-    if {"r1", "r2"}.issubset(rows[0]):
-        r = torch.tensor([[float(r["r1"]), float(r["r2"])] for r in rows])
+    # However many rN columns the file carries, in order. add_properties.py
+    # writes r1=brightness, r2=aggregation proxy, r3=stability, where r3 exists
+    # to be constrained rather than scalarized. Two columns is the older layout
+    # and still works.
+    names = [f"r{i}" for i in range(1, 100)]
+    names = names[:next((k for k, n in enumerate(names) if n not in rows[0]), 0)]
+    if len(names) >= 2:
+        r = torch.tensor([[float(row[n]) for n in names] for row in rows])
     else:
+        names = ["r1", "r2"]
         r = composition_proxies(sequences)
     if set(c.tolist()) != {0, 1} or not torch.isfinite(r).all():
         raise ValueError("Both c=0 and c=1 must be present; r1/r2 must be finite")
@@ -107,7 +114,10 @@ def load_data(csv_path: Path, esm_hf_id: str, cache_dir: Path, max_length: int =
     z_std  = z.std((0, 1), correction=0, keepdim=True).clamp_min(1e-4)
     r_mean, r_std = r.mean(0), r.std(0, correction=0).clamp_min(1e-6)
     dataset = TensorDataset((z - z_mean) / z_std, c, (r - r_mean) / r_std)
-    stats = {"z_mean": z_mean, "z_std": z_std, "r_mean": r_mean, "r_std": r_std}
+    stats = {"z_mean": z_mean, "z_std": z_std, "r_mean": r_mean, "r_std": r_std,
+             "r_names": names}
+    print(f"  Properties: {', '.join(names)}  "
+          f"(raw means {', '.join(f'{v:+.3f}' for v in r_mean.tolist())})")
     return dataset, esm, tokenizer, stats, sequences
 
 
@@ -234,17 +244,18 @@ class TransformerField(nn.Module):
 
 
 class RewardModel(nn.Module):
-    def __init__(self, length, dim, hidden=HIDDEN, arch="mlp"):
+    def __init__(self, length, dim, hidden=HIDDEN, arch="mlp", n_props=2):
         super().__init__()
         self.arch = arch
+        self.n_props = n_props
         if arch == "transformer":
             # Same trunk, then mean-pool over residues to one value per objective.
             self.trunk = TransformerField(length, dim, d_model=hidden)
-            self.head = nn.Linear(dim, 2)
+            self.head = nn.Linear(dim, n_props)
         else:
             self.net = nn.Sequential(
                 nn.Linear(length * dim + 1, hidden), nn.SiLU(),
-                nn.Linear(hidden, hidden), nn.SiLU(), nn.Linear(hidden, 2),
+                nn.Linear(hidden, hidden), nn.SiLU(), nn.Linear(hidden, n_props),
             )
 
     def forward(self, z, t):
@@ -387,9 +398,10 @@ def endpoint_from_noise(z, eps, alpha_bar):
 def train_flow(dataset, epochs, batch_size=BATCH_SIZE, hidden=HIDDEN,
                interpolant="linear", arch="mlp"):
     _, length, dim = dataset.tensors[0].shape
+    n_props = dataset.tensors[2].shape[1]
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     model  = FlowModel(length, dim, hidden, arch).to(DEVICE)
-    reward = RewardModel(length, dim, hidden, arch).to(DEVICE)
+    reward = RewardModel(length, dim, hidden, arch, n_props).to(DEVICE)
     opt    = torch.optim.Adam(list(model.parameters()) + list(reward.parameters()), lr=LEARNING_RATE)
     losses = []
     for epoch in range(epochs):
@@ -419,7 +431,8 @@ def train_diffusion(dataset, epochs, batch_size=BATCH_SIZE, hidden=HIDDEN, arch=
     K      = len(betas) - 1
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     model  = DiffusionModel(length, dim, alpha_bars, hidden, arch, predict).to(DEVICE)
-    reward = RewardModel(length, dim, hidden, arch).to(DEVICE)
+    reward = RewardModel(length, dim, hidden, arch,
+                         dataset.tensors[2].shape[1]).to(DEVICE)
     ema = EMA(model, ema_decay) if ema_decay > 0 else None
     opt    = torch.optim.Adam(list(model.parameters()) + list(reward.parameters()), lr=LEARNING_RATE)
     losses = []
@@ -454,8 +467,149 @@ def train_diffusion(dataset, epochs, batch_size=BATCH_SIZE, hidden=HIDDEN, arch=
 # Sampling
 # ══════════════════════════════════════════════════════════════════════════════
 
+class Objective:
+    """Turns raw reward-head outputs into the scalar guidance follows.
+
+    The reward head predicts standardized property values. What guidance should
+    climb is not always the raw prediction, and Lecture 3.4 separates the two
+    cases this implements.
+
+    Objectives are scalarized on a simplex: R_lambda = sum_m lambda_m * term_m,
+    each term written so larger is better.
+
+      setpoint    term_0 = -(r1 - y*)^2 rather than +r1. Steering brightness
+                  "up" is a weak claim on GFP because nearly any substitution
+                  makes it dimmer, so a dim output demonstrates nothing. Hitting
+                  a requested value tests calibration: sweep y* and report the
+                  slope of achieved against requested.
+      sense       -1 for a property to be minimized. The slides: "For a property
+                  that should be minimized, such as toxicity, we reverse its
+                  sign so that larger normalized values consistently represent
+                  more desirable outcomes."
+
+    The constraint is deliberately NOT on that simplex. Lecture 3.4 keeps it
+    separate -- "Scalarization tells the model which valid outcomes are
+    preferred. A constraint specifies which outcomes are allowed" -- as a
+    one-sided squared penalty subtracted from the scalarized reward:
+
+        R = sum_m lambda_m * term_m  -  rho * max(0, r_c - threshold)^2
+
+    so rho is a severity, not a tradeoff weight, and raising it cannot silently
+    eat the objective budget.
+
+    All thresholds and setpoints arrive in STANDARDIZED units. Callers convert
+    from raw with from_raw(), because the reward head only ever sees the
+    standardized targets load_data() built.
+    """
+
+    def __init__(self, n_props, setpoint=None, senses=None,
+                 constraint_index=None, constraint_threshold=None, rho=0.0,
+                 setpoint_saturation=4.0):
+        self.n_props = n_props
+        self.setpoint = setpoint
+        self.setpoint_saturation = float(setpoint_saturation)
+        # Properties past the constrained one are not objectives.
+        self.n_obj = n_props if constraint_index is None else constraint_index
+        self.senses = tuple(senses) if senses is not None else (1.0,) * self.n_obj
+        if len(self.senses) != self.n_obj:
+            raise ValueError(f"senses must have {self.n_obj} entries, got {len(self.senses)}")
+        self.constraint_index = constraint_index
+        self.constraint_threshold = constraint_threshold
+        self.rho = float(rho)
+
+    @property
+    def constrained(self) -> bool:
+        return (self.constraint_index is not None
+                and self.constraint_threshold is not None and self.rho > 0.0)
+
+    @staticmethod
+    def from_raw(value, index, stats):
+        """Convert a raw property value into the standardized space."""
+        mean = float(stats["r_mean"][index])
+        std = float(stats["r_std"][index])
+        return (float(value) - mean) / std
+
+    def term_scale(self, rewards, j):
+        """Scalar multiplier for objective j, [B], bounded to [-1, 1].
+
+        Exists because `normalize` and `setpoint` otherwise destroy each other.
+        Normalization rescales a term's gradient to unit norm so lambda is not
+        confounded with whatever scale a reward head learned. But the setpoint
+        gradient is -2(r1 - y*) * d r1/dz, so dividing out its norm divides out
+        the error factor too and leaves only its sign: every target above the
+        current prediction collapses to plain maximize, every target below it to
+        plain minimize, and a setpoint sweep returns one answer repeated.
+
+        So normalization is applied to the RAW property gradient, and the
+        objective's own factor is reapplied here. Clamping keeps the guidance
+        term bounded by sum(lambda) = 1 (plus rho for the constraint), so the
+        step stays interpretable and cannot blow up; within the clamp the
+        controller still decelerates as it approaches the target and stops on
+        it, which is the behaviour a setpoint is for.
+        """
+        if j == 0 and self.setpoint is not None:
+            bound = self.setpoint_saturation
+            return (2.0 * (self.setpoint - rewards[:, 0])).clamp(-bound, bound)
+        return torch.full_like(rewards[:, j], self.senses[j])
+
+    def terms(self, rewards):
+        """Per-sample value of each scalarized objective, [B, n_obj].
+
+        Larger is better in every column, so the caller can weight them directly.
+        """
+        columns = []
+        for j in range(self.n_obj):
+            if j == 0 and self.setpoint is not None:
+                columns.append(-(rewards[:, 0] - self.setpoint) ** 2)
+            else:
+                columns.append(self.senses[j] * rewards[:, j])
+        return torch.stack(columns, dim=1)
+
+    def penalty(self, rewards):
+        """One-sided squared violation of the constraint, [B]. Zero when satisfied."""
+        excess = rewards[:, self.constraint_index] - self.constraint_threshold
+        return excess.clamp_min(0.0) ** 2
+
+    def describe(self, stats=None, names=None):
+        names = names or (stats or {}).get("r_names") or [f"r{i+1}" for i in range(self.n_props)]
+        parts = []
+        for j in range(self.n_obj):
+            if j == 0 and self.setpoint is not None:
+                parts.append(f"-({names[0]} - {self.setpoint:+.3f})^2")
+            else:
+                parts.append(f"{'+' if self.senses[j] > 0 else '-'}{names[j]}")
+        text = "  objectives : " + ", ".join(parts)
+        if self.constrained:
+            text += (f"\n  constraint : penalty {self.rho:g} * "
+                     f"max(0, {names[self.constraint_index]} - "
+                     f"{self.constraint_threshold:+.3f})^2")
+        return text
+
+
+def weight_vector(lambdas, objective=None):
+    """Tradeoff weights on the simplex, one per scalarized objective.
+
+    Lecture 3.4 requires nonnegative weights summing to one, so the mix is a
+    tradeoff rather than a second guidance-strength dial confounded with eta.
+    A shorter list is zero-padded, which is what lets the default lambdas=(1, 0)
+    keep working when a third property is present but constrained rather than
+    scalarized.
+    """
+    n = len(lambdas) if objective is None else objective.n_obj
+    values = list(lambdas[:n]) + [0.0] * max(0, n - len(lambdas))
+    if len(lambdas) > n:
+        raise ValueError(f"Got {len(lambdas)} lambdas for {n} objectives: {lambdas}")
+    if any(v < 0 for v in values):
+        raise ValueError(f"lambdas must be nonnegative, got {lambdas}")
+    lam = torch.tensor(values, dtype=torch.float32, device=DEVICE)
+    total = lam.sum()
+    if float(total) <= 0:
+        raise ValueError(f"lambdas must not be all zero, got {lambdas}")
+    return lam / total
+
+
 def reward_gradient(reward_model, z, t, lambdas, clip=0.0, normalize=False,
-                    endpoint=None):
+                    endpoint=None, objective=None):
     """Gradient of the lambda-weighted reward with respect to the latent.
 
     Lecture 3.4 lists two precautions this implements.
@@ -486,18 +640,43 @@ def reward_gradient(reward_model, z, t, lambdas, clip=0.0, normalize=False,
             # replaces a nearly uninformative signal early in the trajectory.
             x1 = endpoint(state)
             rewards = reward_model(x1, torch.ones_like(t))
+        # Without an Objective this is the historical behaviour: climb the raw
+        # predictions. With one, each column is already sign-corrected and any
+        # setpoint transform applied, and the constraint is handled separately
+        # so its severity rho stays off the lambda simplex.
+        terms = rewards if objective is None else objective.terms(rewards)
+        penalty = (objective.penalty(rewards)
+                   if objective is not None and objective.constrained else None)
+
+        def unit(g):
+            norm = g.flatten(1).norm(dim=1).clamp_min(1e-12)
+            return g / norm.view(-1, *([1] * (g.dim() - 1)))
+
+        keep = penalty is not None
         if normalize:
             # One backward per objective so each can be scaled independently.
+            # Differentiate the RAW property and reapply the objective's factor
+            # afterwards: normalizing the composed term would divide that factor
+            # out. See Objective.term_scale.
             total = torch.zeros_like(state)
-            for j in range(rewards.shape[1]):
+            for j in range(terms.shape[1]):
                 if float(lambdas[j]) == 0.0:
                     continue
-                g = torch.autograd.grad(rewards[:, j].sum(), state, retain_graph=True)[0]
-                norm = g.flatten(1).norm(dim=1).clamp_min(1e-12)
-                total = total + lambdas[j] * g / norm.view(-1, *([1] * (g.dim() - 1)))
+                source = rewards[:, j] if objective is not None else terms[:, j]
+                g = torch.autograd.grad(source.sum(), state, retain_graph=True)[0]
+                g = unit(g)
+                if objective is not None:
+                    scale = objective.term_scale(rewards, j)
+                    g = g * scale.view(-1, *([1] * (g.dim() - 1)))
+                total = total + lambdas[j] * g
             grad = total
         else:
-            grad = torch.autograd.grad((rewards * lambdas).sum(1).sum(), state)[0]
+            grad = torch.autograd.grad((terms * lambdas).sum(1).sum(), state,
+                                       retain_graph=keep)[0]
+        if keep:
+            # Descend the violation: subtract rho times its gradient.
+            g = torch.autograd.grad(penalty.sum(), state)[0]
+            grad = grad - objective.rho * (unit(g) if normalize else g)
     grad = grad.detach()
     if clip and clip > 0:
         norm = grad.flatten(1).norm(dim=1)
@@ -509,7 +688,8 @@ def reward_gradient(reward_model, z, t, lambdas, clip=0.0, normalize=False,
 @torch.no_grad()
 def sample_flow(model, reward_model, n=8, c=1, w=0.0, eta=0.0, lambdas=(1., 0.), steps=200,
                 anchor=None, strength=1.0, clip=0.0, normalize=False,
-                interpolant="linear", endpoint_guidance=False, seed=123):
+                interpolant="linear", endpoint_guidance=False, seed=123,
+                objective=None):
     """Integrate the velocity field from t=0 to t=1.
 
     With `anchor` (a standardized reference latent) the trajectory starts from a
@@ -518,8 +698,7 @@ def sample_flow(model, reward_model, n=8, c=1, w=0.0, eta=0.0, lambdas=(1., 0.),
     a vanishingly small region of a 237x320 latent space, so integrating from
     N(0, I) rarely lands on it. strength=1.0 reproduces the unanchored path.
     """
-    lam = torch.tensor(lambdas, dtype=torch.float32, device=DEVICE)
-    lam = lam / lam.sum()
+    lam = weight_vector(lambdas, objective)
     torch.manual_seed(seed)
     start = 0.0
     if anchor is None:
@@ -548,7 +727,7 @@ def sample_flow(model, reward_model, n=8, c=1, w=0.0, eta=0.0, lambdas=(1., 0.),
                     return endpoint_from_velocity(state, _t, model(state, _t, _null),
                                                   interpolant)
             v = v + kappa * reward_gradient(reward_model, z, t, lam, clip, normalize,
-                                            endpoint)
+                                            endpoint, objective)
         z = z + dt * v
     return z
 
@@ -557,15 +736,14 @@ def sample_flow(model, reward_model, n=8, c=1, w=0.0, eta=0.0, lambdas=(1., 0.),
 def sample_diffusion(model, reward_model, alpha_bars, betas, alphas, post_vars,
                      n=8, c=1, w=0.0, eta=0.0, lambdas=(1., 0.),
                      anchor=None, strength=1.0, clip=0.0, normalize=False,
-                     endpoint_guidance=False, seed=123):
+                     endpoint_guidance=False, seed=123, objective=None):
     """Run the reverse chain from step K down to 1.
 
     With `anchor` the chain starts at step round(strength * K) from the forward-
     noised anchor (SDEdit), rather than at K from pure noise. strength=1.0
     reproduces the unanchored chain.
     """
-    lam = torch.tensor(lambdas, dtype=torch.float32, device=DEVICE)
-    lam = lam / lam.sum()
+    lam = weight_vector(lambdas, objective)
     K    = len(betas) - 1
     torch.manual_seed(seed)
     start = K
@@ -604,7 +782,8 @@ def sample_diffusion(model, reward_model, alpha_bars, betas, alphas, post_vars,
                     return out if model.predict == "x0" else \
                         endpoint_from_noise(state, out, _a)
             eps = eps - eta * sigma * reward_gradient(reward_model, z, t, lam,
-                                                      clip, normalize, endpoint)
+                                                      clip, normalize, endpoint,
+                                                      objective)
         mean = (z - betas[k] * eps / sigma) / alphas[k].sqrt()
         z    = mean + post_vars[k].sqrt() * torch.randn_like(z) if k > 1 else mean
     return z
@@ -1069,11 +1248,103 @@ def main():
                              "default suits the 64-sequence teaching set; at tens of "
                              "thousands of sequences it leaves the GPU mostly idle and "
                              "128-256 trains several times faster per epoch.")
-    parser.add_argument("--cfg-weight", type=float, default=2.0, metavar="W",
-                        help="Classifier-free guidance weight for the 'cfg' mode "
-                             "(default: 2.0, tuned on a 24x320 latent). A 237x320 "
-                             "latent has a much larger norm, so this usually needs "
-                             "raising before guidance changes the decoded output.")
+    parser.add_argument("--cfg-weight", type=float, nargs="+", default=[2.0],
+                        metavar="W",
+                        help="Classifier-free guidance weights, adding one 'cfg' arm "
+                             "per value (default: 2.0, tuned on a 24x320 latent; a "
+                             "237x320 latent has a much larger norm). Like "
+                             "--reward-eta this is a sampling-time knob, so several "
+                             "values cost one extra sampling pass each rather than a "
+                             "retraining apiece, and every arm reads the same trained "
+                             "field. The first value keeps the bare name 'cfg'.\n"
+                             "Pass 0 to get the UNCONDITIONAL control: Lecture 3.4's "
+                             "field is v_uncond + w(v_cond - v_uncond), so w=0 is the "
+                             "unconditional field, w=1 the ordinary conditional field, "
+                             "and w>1 extrapolates beyond it. Without a w=0 arm a run "
+                             "cannot separate what the conditioning contributes from "
+                             "what the model and the decoder would have produced "
+                             "anyway, so '0 1 2 4' is the sweep that actually "
+                             "demonstrates conditional generation.")
+    parser.add_argument("--reward-lambda", type=float, nargs="+", default=None,
+                        metavar="L1",
+                        help="Sweep the objective mix, adding an arm 'lamL1' per value "
+                             "with lambdas=(L1, 1-L1): 1.0 is brightness alone, 0.0 is "
+                             "parsimony alone. Only informative when the mutation count "
+                             "can actually vary -- with --exact-mutations every sample "
+                             "carries the same number of substitutions, so r2 is "
+                             "constant in the output and the arms come out identical. "
+                             "Pair this with --mut-budget as a ceiling and no "
+                             "--exact-mutations to trace a real Pareto front.")
+    parser.add_argument("--setpoint", type=float, nargs="+", default=None,
+                        metavar="Y",
+                        help="Target brightness values, in the same raw units as "
+                             "the r1 column. Replaces 'maximize r1' with the "
+                             "calibration objective -(r1 - y)^2, adding one arm "
+                             "'sp<y>' per value. Steering GFP dimmer is a null "
+                             "task -- nearly any substitution does it -- so "
+                             "hitting a requested value is the stronger claim: "
+                             "plot achieved against requested and report the "
+                             "slope. Use --setpoint-percentile to give these as "
+                             "percentiles of the training brightness instead.")
+    parser.add_argument("--setpoint-percentile", action="store_true",
+                        help="Read --setpoint values as percentiles (0-100) of "
+                             "the training r1 distribution rather than as raw "
+                             "scores. Multiples of the wild type are NOT offered "
+                             "because prepare_gfp.py centres r1 on the wild type, "
+                             "so WT is exactly 0 and every multiple of it "
+                             "collapses to the same target. The avgfp_train "
+                             "distribution is also strongly bimodal -- a dark "
+                             "cluster near -2.42 and a functional cluster near "
+                             "-0.1 -- so evenly spaced raw targets are not "
+                             "evenly populated, and percentiles are the safer "
+                             "default. p50 = -0.43, p90 = -0.00, p99 = +0.15.")
+    parser.add_argument("--setpoint-saturation", type=float, default=4.0,
+                        metavar="C",
+                        help="Largest multiplier the setpoint controller may "
+                             "apply, which caps guidance at C (plus the "
+                             "constraint's rho) and so keeps the step bounded. "
+                             "The factor is 2*(target - predicted) in "
+                             "STANDARDIZED units, so the controller saturates "
+                             "once it is C/2 standard deviations from target and "
+                             "below that decelerates toward it. Set this too low "
+                             "and distant setpoints become indistinguishable: "
+                             "every one of them saturates, and the whole sweep "
+                             "collapses onto plain maximize. avgfp_train spans "
+                             "about 2.7 standard deviations of r1, so C=6 never "
+                             "saturates anywhere in the observed range; the "
+                             "default 4.0 trades a little of that for a smaller "
+                             "step.")
+    parser.add_argument("--minimize", type=int, nargs="+", default=None,
+                        metavar="IDX",
+                        help="1-based property columns to minimize rather than "
+                             "maximize, so larger normalized values always mean "
+                             "more desirable (Lecture 3.4). With the CSV that "
+                             "add_properties.py writes, pass 2: r2 is "
+                             "exposed_hydrophobics, an aggregation proxy.")
+    parser.add_argument("--constraint-property", type=int, default=None,
+                        metavar="IDX",
+                        help="1-based property column held as a CONSTRAINT "
+                             "instead of a scalarized objective. Columns from "
+                             "here on are excluded from the lambda simplex. Pass "
+                             "3 for the add_properties.py layout, where r3 is "
+                             "Rosetta total_score: measured Spearman -0.67 with "
+                             "brightness on avgfp_train, the most "
+                             "brightness-redundant of METL's 55 attributes, so "
+                             "weighting it against brightness would trace a line "
+                             "rather than a Pareto front. As a constraint that "
+                             "redundancy is harmless.")
+    parser.add_argument("--constraint-delta", type=float, default=0.5,
+                        metavar="D",
+                        help="Allowed slack above the reference sequence's own "
+                             "value of the constrained property, in raw units "
+                             "(default: 0.5). The penalty is zero at or below "
+                             "reference + D.")
+    parser.add_argument("--constraint-rho", type=float, default=0.0,
+                        metavar="RHO",
+                        help="Severity of the one-sided squared constraint "
+                             "penalty (default: 0, off). Deliberately not on the "
+                             "lambda simplex, so raising it cannot silently eat "
+                             "the objective budget.")
     parser.add_argument("--reward-eta", type=float, nargs="+", default=[1.0],
                         metavar="ETA",
                         help="Reward-gradient strength for the 'single' and 'multi' "
@@ -1225,6 +1496,94 @@ def main():
               f"from the {source} reference")
     anchor_kwargs = {} if anchor is None else {"anchor": anchor,
                                                "strength": args.anchor_strength}
+    # ── Objective assembly ────────────────────────────────────────────────────
+    n_props = dataset.tensors[2].shape[1]
+    prop_names = stats.get("r_names") or [f"r{i+1}" for i in range(n_props)]
+
+    def check_column(value, flag):
+        if not 1 <= value <= n_props:
+            parser.error(f"{flag} must be between 1 and {n_props} "
+                         f"(the CSV has {n_props} property columns: "
+                         f"{', '.join(prop_names)})")
+        return value - 1
+
+    constraint_index = (None if args.constraint_property is None
+                        else check_column(args.constraint_property,
+                                          "--constraint-property"))
+    n_obj = n_props if constraint_index is None else constraint_index
+    if n_obj < 1:
+        parser.error("--constraint-property must leave at least one objective column")
+
+    senses = [1.0] * n_obj
+    for column in (args.minimize or []):
+        index = check_column(column, "--minimize")
+        if index >= n_obj:
+            parser.error(f"--minimize {column} names a constrained column, "
+                         f"which has no direction on the objective simplex")
+        senses[index] = -1.0
+
+    # Setpoints are raw; the reward head predicts standardized values.
+    raw_r1 = (dataset.tensors[2][:, 0] * float(stats["r_std"][0])
+              + float(stats["r_mean"][0]))
+    setpoint_raw = list(args.setpoint or [])
+    if args.setpoint_percentile:
+        if any(not 0.0 <= v <= 100.0 for v in setpoint_raw):
+            parser.error("--setpoint-percentile expects values in [0, 100]")
+        setpoint_raw = [float(np.percentile(raw_r1.numpy(), v)) for v in setpoint_raw]
+    elif setpoint_raw:
+        low, high = float(raw_r1.min()), float(raw_r1.max())
+        outside = [v for v in setpoint_raw if not low <= v <= high]
+        if outside:
+            print(f"  [warn] setpoints outside the observed r1 range "
+                  f"[{low:+.3f}, {high:+.3f}]: {outside}. These ask the reward "
+                  f"model to extrapolate, which is the regime it is least "
+                  f"reliable in.")
+
+    constraint_threshold = None
+    if constraint_index is not None and args.constraint_rho > 0:
+        # Threshold relative to the reference sequence's own value, so the
+        # constraint reads "no less stable than wild type, by more than delta".
+        raw_c = dataset.tensors[2][:, constraint_index].clone()
+        raw_c = raw_c * float(stats["r_std"][constraint_index]) \
+            + float(stats["r_mean"][constraint_index])
+        reference_value = float(raw_c.min()) if reference is None else None
+        if reference is not None:
+            try:
+                import embedding_oracle as _eo
+                name = prop_names[constraint_index]
+                attr = _eo.metl_attributes_wt(reference)
+                reference_value = float(attr[_eo.attribute_index(
+                    "total_score" if name == "r3" else name)])
+            except Exception as exc:                       # noqa: BLE001
+                reference_value = float(np.median(raw_c.numpy()))
+                print(f"  [warn] could not read the reference value for "
+                      f"{prop_names[constraint_index]} ({exc}); falling back to "
+                      f"the training median {reference_value:+.3f}")
+        constraint_threshold = Objective.from_raw(
+            reference_value + args.constraint_delta, constraint_index, stats)
+        print(f"  Constraint reference {prop_names[constraint_index]}="
+              f"{reference_value:+.3f}, slack {args.constraint_delta:+.3f}")
+
+    objective = Objective(
+        n_props=n_props,
+        setpoint=None,
+        senses=senses,
+        constraint_index=constraint_index if args.constraint_rho > 0 else None,
+        constraint_threshold=constraint_threshold,
+        rho=args.constraint_rho,
+    )
+    print(objective.describe(stats, prop_names))
+
+    def with_setpoint(value):
+        """A copy of the objective targeting one raw brightness value."""
+        return Objective(
+            n_props=n_props, setpoint=Objective.from_raw(value, 0, stats),
+            senses=senses,
+            constraint_index=objective.constraint_index,
+            constraint_threshold=constraint_threshold, rho=args.constraint_rho,
+            setpoint_saturation=args.setpoint_saturation,
+        )
+
     guide_kwargs = {"clip": args.guidance_clip, "normalize": args.normalize_guidance,
                     "endpoint_guidance": args.endpoint_guidance,
                     "seed": args.sample_seed}
@@ -1260,6 +1619,22 @@ def main():
                                if args.restrict_support else None),
         "support_level":      args.support_level if args.restrict_support else None,
         "freeze_positions":   list(frozen),
+        # Objective definition. Without these a results.pt cannot be read back:
+        # the same lambda means a different tradeoff under a different sense or
+        # constraint, so an arm name alone does not identify what was optimized.
+        "property_names":     list(prop_names),
+        "n_objectives":       n_obj,
+        "objective_senses":   list(senses),
+        "setpoints_raw":      [float(v) for v in setpoint_raw] or None,
+        "setpoints_given":    list(args.setpoint) if args.setpoint else None,
+        "setpoint_percentile": bool(args.setpoint_percentile),
+        "minimize":           list(args.minimize) if args.minimize else None,
+        "constraint_property": args.constraint_property,
+        "constraint_delta":   args.constraint_delta if args.constraint_rho else None,
+        "constraint_rho":     args.constraint_rho or None,
+        "constraint_threshold_standardized": (float(constraint_threshold)
+                                              if constraint_threshold is not None
+                                              else None),
         "min_polar":       args.min_polar,
         "reference":       reference,
         "anchor_strength": args.anchor_strength,
@@ -1270,9 +1645,10 @@ def main():
         "ema":             args.ema,
         "diffusion_steps": args.diffusion_steps,
         "stratified":      args.stratified_timesteps,
-        "cfg_weight":      args.cfg_weight,
+        "cfg_weight":      list(args.cfg_weight),
         "reward_eta":      args.reward_eta[0],
         "reward_etas":     list(args.reward_eta),
+        "reward_lambdas":  list(args.reward_lambda) if args.reward_lambda else None,
         "guidance_clip":   args.guidance_clip,
         "normalize_guidance": args.normalize_guidance,
         "endpoint_guidance":  args.endpoint_guidance,
@@ -1313,18 +1689,65 @@ def main():
     def eta_tag(value):
         return f"{value:g}"
 
+    base_lambdas = (1.,) + (0.,) * (n_obj - 1)
+    mixed_lambdas = ((0.7, 0.3) + (0.,) * (n_obj - 2)) if n_obj >= 2 else (1.,)
     guidance_configs = {
-        "cfg": dict(c=1, w=args.cfg_weight, eta=0.0, lambdas=(1., 0.)),
+        f"cfg{'' if i == 0 else '@' + eta_tag(w)}": dict(
+            c=1, w=w, eta=0.0, lambdas=base_lambdas, objective=objective)
+        for i, w in enumerate(args.cfg_weight)
     }
     for position, eta in enumerate(args.reward_eta):
         suffix = "" if position == 0 else f"@{eta_tag(eta)}"
         guidance_configs[f"single{suffix}"] = dict(c=1, w=0.0, eta=eta,
-                                                   lambdas=(1., 0.))
-        guidance_configs[f"multi{suffix}"] = dict(c=1, w=0.0, eta=eta,
-                                                  lambdas=(0.7, 0.3))
+                                                   lambdas=base_lambdas,
+                                                   objective=objective)
+        if n_obj >= 2:
+            guidance_configs[f"multi{suffix}"] = dict(c=1, w=0.0, eta=eta,
+                                                      lambdas=mixed_lambdas,
+                                                      objective=objective)
+        for value in (args.reward_lambda or []):
+            if not 0.0 <= value <= 1.0:
+                parser.error("--reward-lambda values must lie in [0, 1]")
+            if n_obj < 2:
+                parser.error("--reward-lambda needs at least two objective "
+                             "columns; this run has one")
+            guidance_configs[f"lam{value:g}{suffix}"] = dict(
+                c=1, w=0.0, eta=eta,
+                lambdas=(value, 1.0 - value) + (0.,) * (n_obj - 2),
+                objective=objective)
+        # Setpoint arms keep the same lambda mix and swap only the brightness
+        # term, so a difference between them is the objective and not the
+        # weighting.
+        for value, target in zip(args.setpoint or [], setpoint_raw):
+            tag = f"p{value:g}" if args.setpoint_percentile else f"{value:g}"
+            guidance_configs[f"sp{tag}{suffix}"] = dict(
+                c=1, w=0.0, eta=eta, lambdas=base_lambdas,
+                objective=with_setpoint(target))
+    if args.setpoint:
+        pairs = ", ".join(f"{v:g}->{t:+.3f}" for v, t in
+                          zip(args.setpoint, setpoint_raw))
+        kind = "percentile" if args.setpoint_percentile else "raw"
+        print(f"  Setpoint arms ({kind}): {pairs}")
+    if len(args.cfg_weight) > 1:
+        named = ", ".join(f"{'cfg' if i == 0 else 'cfg@' + eta_tag(w)}=w{w:g}"
+                          for i, w in enumerate(args.cfg_weight))
+        print(f"  Sweeping cfg weight {args.cfg_weight} from one trained model: {named}")
+        if 0.0 in args.cfg_weight:
+            which = "cfg" if args.cfg_weight[0] == 0.0 else f"cfg@{eta_tag(0.0)}"
+            print(f"    '{which}' has w=0 and is the UNCONDITIONAL control: it drops "
+                  f"the conditional term entirely, so the gap between it and the w>0 "
+                  f"arms is what the conditioning contributes.")
     if len(args.reward_eta) > 1:
         print(f"  Sweeping reward eta {args.reward_eta} from one trained model; "
               f"eta={args.reward_eta[0]} drives the bare 'single'/'multi' arms.")
+    if args.reward_lambda:
+        print(f"  Sweeping lambda {args.reward_lambda} "
+              f"(brightness weight; parsimony gets the remainder)")
+        if args.exact_mutations:
+            print("  [warn] --exact-mutations fixes the substitution count, so the "
+                  "parsimony objective cannot change it and the lambda arms will be "
+                  "near-identical. Drop it, and make --mut-budget a ceiling, for a "
+                  "real trade-off.")
 
     # ── Flow matching ─────────────────────────────────────────────────────────
     print("\nTraining flow matching model...")
@@ -1384,6 +1807,36 @@ def main():
                 print(f"  {method:<12}{name:<9}{scores.mean():>9.3f}"
                       f"{scores.max():>9.3f}{distance:>9.1f}"
                       f"{len(set(latent['sequences'])):>4}/{len(latent['sequences'])}")
+        if args.reward_lambda and reference is not None:
+            # The Pareto front itself: each objective's achieved value, not the
+            # weight it was given. Parsimony is only a real objective when the
+            # decoder is free to vary the count, so the substitution column is
+            # what shows whether the trade-off exists at all -- if it is constant
+            # down a block, lambda is weighting something the decoder overrides.
+            print("\nObjective trade-off (lambda = weight on brightness; "
+                  "parsimony gets the rest)")
+            head = (f"  {'method':<11}{'arm':<14}{'lambda':>7}{'mutations':>11}"
+                    f"{'brightness':>12}{'best':>9}{'uniq':>8}")
+            print(head + "\n  " + "-" * (len(head) - 2))
+            for method, latents in (("flow", flow_latents),
+                                    ("diffusion", diff_latents)):
+                for name, latent in sorted(latents.items()):
+                    if not name.startswith("lam"):
+                        continue
+                    weight = guidance_configs[name]["lambdas"][0]
+                    seqs = latent["sequences"]
+                    mutations = np.mean([sum(a != b for a, b in zip(s, reference))
+                                         for s in seqs])
+                    s = latent["oracle"]
+                    mean = float("nan") if s is None else s.mean()
+                    best = float("nan") if s is None else s.max()
+                    print(f"  {method:<11}{name:<14}{weight:>7.2f}{mutations:>11.2f}"
+                          f"{mean:>12.3f}{best:>9.3f}"
+                          f"{len(set(seqs)):>5}/{len(seqs)}")
+            print("  A front needs both columns to move: brightness rising as "
+                  "mutations rise means the objectives genuinely compete. A flat "
+                  "mutation column means parsimony had no room to act.")
+
         if len(decode_fns) > 1:
             print("\nSame latents decoded at each mutation budget "
                   "(brightness is wild-type centered)")
