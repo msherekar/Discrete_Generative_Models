@@ -19,3 +19,22 @@ venv/
 # Logs / Env
 *.log
 .env
+
+# Nested git repositories. Committing these creates gitlinks -- broken
+# submodule pointers that carry no files -- which is what commit 7f158fe
+# had to undo. Clone them separately instead.
+metl/
+Data_GFP/
+scripts/
+papers/
+lecture/
+
+# Course slide PDFs (68 MB, not our work)
+Slides/
+
+# Generated figures and metric dumps (227 MB, reproducible from outputs/)
+# Force-add a specific figure for the writeup with: git add -f <path>
+CIS6270/project1_eval/plots/
+
+CLAUDE.md
+uv.lock
