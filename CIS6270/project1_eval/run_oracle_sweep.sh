@@ -44,9 +44,11 @@ echo "  memory : $(free -g | awk '/^Mem:/{print $7" GiB available of "$2" GiB"}'
 
 # ── preflight ────────────────────────────────────────────────────────────────
 fail=0
-for f in "$PY" oracle_sweep.py embedding_oracle.py gfp_oracle.py data/avgfp_wt.txt; do
+for f in "$PY" data/avgfp_wt.txt; do
     [ -e "$f" ] || { echo "  MISSING: $f"; fail=1; }
 done
+"$PY" -c "import dgm.project1.oracle_sweep, dgm.project1.embedding_oracle" 2>/dev/null \
+  || { echo "  MISSING dgm package (run 'uv sync' in ..)"; fail=1; }
 for f in ../../metl/pretrained_models/Hr4GNHws.pt \
          ../../Data_GFP/data/dms_data/avgfp/avgfp.tsv; do
     [ -e "$f" ] || { echo "  MISSING: $f"; fail=1; }
@@ -73,12 +75,12 @@ declare -a FAILED=()
 for model in "${MODELS[@]}"; do
     say "=== $model ==="
     started=$SECONDS
-    "$PY" oracle_sweep.py --models "$model" --append --out "$OUT"
+    "$PY" -m dgm.project1.oracle_sweep --models "$model" --append --out "$OUT"
     status=$?
 
     if [ "$model" = "esm2_650m" ] && { [ $status -ne 0 ] || model_errored esm2_650m; }; then
         say "650M did not complete at full data; retrying with --train-n $BIG_FALLBACK_N"
-        "$PY" oracle_sweep.py --models "$model" --train-n "$BIG_FALLBACK_N" \
+        "$PY" -m dgm.project1.oracle_sweep --models "$model" --train-n "$BIG_FALLBACK_N" \
               --append --out "$OUT"
         status=$?
     fi
@@ -96,10 +98,10 @@ done
 if [ "${SKIP_ORACLE_FIT:-0}" != "1" ]; then
     say "=== fitting METL oracle on the full oracle split ==="
     if [ -e data/avgfp_oracle.csv ]; then
-        "$PY" embedding_oracle.py --fit --backend metl \
+        "$PY" -m dgm.project1.embedding_oracle --fit --backend metl \
             || say "oracle fit FAILED -- the sweep results above are unaffected"
     else
-        say "data/avgfp_oracle.csv not found; run prepare_gfp.py first. Skipping."
+        say "data/avgfp_oracle.csv not found; run dgm-prepare-gfp first. Skipping."
     fi
 fi
 

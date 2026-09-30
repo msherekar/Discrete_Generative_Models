@@ -22,7 +22,7 @@ cd "$(dirname "$0")" || exit 1
 # ── CONFIG ───────────────────────────────────────────────────────────────────
 MODALITY="${MODALITY:-protein}"          # protein | image
 PREFIX="${PREFIX:-ep}"                   # run-name prefix; keep distinct per study
-PY="${PY:-../.venv/bin/python}"
+PY="${PY:-../.venv/bin/python}"          # dgm is installed here by `uv sync`
 SEEDS="${SEEDS:-11 12 13 14 15}"
 ETAS="${ETAS:-1 5 20 50}"
 VARIANTS="${VARIANTS:-st ep}"            # st = state-based, ep = endpoint guidance
@@ -35,9 +35,9 @@ SKIP_EXISTING="${SKIP_EXISTING:-1}"      # do not recompute finished runs
 
 # Modality-specific defaults.
 case "$MODALITY" in
-  protein) RUNNER="run_experiment.py"
-           DATA_ARGS="${DATA_ARGS:---esm-model esm2_8m --dataset ../lecture_3/esm2_example.csv}" ;;
-  image)   RUNNER="run_mnist.py"
+  protein) RUNNER="dgm.project1.run_experiment"
+           DATA_ARGS="${DATA_ARGS:---esm-model esm2_8m --dataset ../lecture/lecture_3/esm2_example.csv}" ;;
+  image)   RUNNER="dgm.project1.run_mnist"
            DATA_ARGS="${DATA_ARGS:---limit 20000}"
            EPOCHS="${EPOCHS_IMAGE:-$EPOCHS}" ;;
   *) echo "Unknown MODALITY '$MODALITY' (expected protein or image)" >&2; exit 1 ;;
@@ -61,8 +61,10 @@ echo "  log      : $LOG"
 # ── preflight ────────────────────────────────────────────────────────────────
 fail=0
 [ -x "$PY" ] || { echo "  MISSING interpreter: $PY"; fail=1; }
-[ -f "$RUNNER" ] || { echo "  MISSING runner: $RUNNER"; fail=1; }
-[ -f analyze_sweep.py ] || { echo "  MISSING analyze_sweep.py"; fail=1; }
+"$PY" -c "import $RUNNER" 2>/dev/null \
+  || { echo "  MISSING runner module: $RUNNER (run 'uv sync' in ..)"; fail=1; }
+"$PY" -c "import dgm.project1.analyze_sweep" 2>/dev/null \
+  || { echo "  MISSING dgm.project1.analyze_sweep"; fail=1; }
 [ $fail -eq 0 ] || { say "preflight failed, nothing run"; exit 1; }
 n_runs=$(( $(wc -w <<<"$SEEDS") * $(wc -w <<<"$ETAS") * $(wc -w <<<"$VARIANTS") ))
 echo "  preflight OK -- $n_runs run(s) planned"
@@ -78,7 +80,7 @@ variant_flags() {
 
 build_cmd() {
   local variant="$1" eta="$2" seed="$3" dir="$4"
-  printf '%s %s %s --dataset-tag %s --seed %s --sample-seed %s --reward-eta %s --cfg-weight %s --epochs %s --samples %s --outdir %s %s %s' \
+  printf '%s -m %s %s --dataset-tag %s --seed %s --sample-seed %s --reward-eta %s --cfg-weight %s --epochs %s --samples %s --outdir %s %s %s' \
     "$PY" "$RUNNER" "$DATA_ARGS" "$(basename "$dir")" "$seed" "$seed" "$eta" \
     "$CFG_WEIGHT" "$EPOCHS" "$SAMPLES" "$dir" "$(variant_flags "$variant")" "$EXTRA"
 }
@@ -113,7 +115,7 @@ say "ran $done_n, skipped $skipped already-complete, failed ${#FAILED[@]}"
 # ── analyze + plot ───────────────────────────────────────────────────────────
 say "analyzing"
 IMAGES_FLAG=""; [ "$MODALITY" = "image" ] && IMAGES_FLAG="--images"
-"$PY" analyze_sweep.py --prefix "$PREFIX" --variants $VARIANTS \
+"$PY" -m dgm.project1.analyze_sweep --prefix "$PREFIX" --variants $VARIANTS \
      --etas $ETAS --seeds $SEEDS $IMAGES_FLAG || say "analysis FAILED"
 
 say "finished"
