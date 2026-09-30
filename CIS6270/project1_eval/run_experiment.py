@@ -866,6 +866,29 @@ def decode_budget(z, esm, tokenizer, stats, reference, budget,
 # Oracle scoring
 # ══════════════════════════════════════════════════════════════════════════════
 
+def decode_all_budgets(z, decode_fns, primary, oracle):
+    """Decode one set of latents at every requested mutation budget.
+
+    The budget is a property of decoding, not of the model: the same latent
+    yields a 3-substitution and a 15-substitution variant depending only on how
+    many positions the decoder is allowed to change. Sweeping it therefore costs
+    one decode per budget instead of one training run per budget, and the
+    comparison is exact rather than confounded, since every budget reads the same
+    latents.
+    """
+    entry = {"latent": z}
+    by_budget = {}
+    for budget, fn in decode_fns.items():
+        seqs = fn(z)
+        by_budget[budget] = {"sequences": seqs,
+                             "oracle": score_with_oracle(seqs, oracle)}
+    entry["sequences"] = by_budget[primary]["sequences"]
+    entry["oracle"] = by_budget[primary]["oracle"]
+    if len(by_budget) > 1:
+        entry["by_budget"] = by_budget
+    return entry
+
+
 def load_brightness_oracle(path: Path):
     """Load a fitted oracle from embedding_oracle.py, or return None.
 
@@ -947,7 +970,8 @@ def main():
     parser.add_argument("--min-polar",  type=int, default=12)
     parser.add_argument("--max-length", type=int, default=128,
                         help="Maximum (and shared) sequence length. Raise to 237 for avGFP.")
-    parser.add_argument("--mut-budget", type=int, default=None,
+    parser.add_argument("--mut-budget", type=int, nargs="+", default=None,
+                        metavar="K",
                         help="Decode as variants of a reference with at most this many "
                              "substitutions (replaces the min-polar constraint). "
                              "The reference defaults to the training-set consensus.")
@@ -1050,9 +1074,17 @@ def main():
                              "(default: 2.0, tuned on a 24x320 latent). A 237x320 "
                              "latent has a much larger norm, so this usually needs "
                              "raising before guidance changes the decoded output.")
-    parser.add_argument("--reward-eta", type=float, default=1.0, metavar="ETA",
+    parser.add_argument("--reward-eta", type=float, nargs="+", default=[1.0],
+                        metavar="ETA",
                         help="Reward-gradient strength for the 'single' and 'multi' "
-                             "modes (default: 1.0). Same caveat as --cfg-weight.")
+                             "modes (default: 1.0). Several values sample the same "
+                             "trained model once per eta, adding arms named "
+                             "'single@ETA'. Eta does not transfer between modalities "
+                             "under --normalize-guidance: the gradient is a unit "
+                             "vector, so its step is the same absolute size at any "
+                             "dimension while the latent norm grows as sqrt(D). A "
+                             "237x320 protein latent has norm ~275 against MNIST's "
+                             "~28, so the same eta moves a protein ~10x less.")
     parser.add_argument("--oracle", type=Path, default=None, metavar="NPZ",
                         help="Fitted brightness oracle from embedding_oracle.py. "
                              "Defaults to data/avgfp_metl_oracle.npz when it exists. "
@@ -1156,19 +1188,33 @@ def main():
               f"({100 * support.sum() / (length * (len(AMINO_ACIDS) - 1)):.1f}%), "
               f"{int((per_position > 0).sum())} of {length} positions usable, "
               f"median {int(np.median(per_position))} alternatives each")
-    if args.mut_budget is None:
-        decode_fn = lambda z: decode(z, esm, tokenizer, stats, args.min_polar)
+    budgets = args.mut_budget
+    if budgets is None:
+        decode_fns = {None: lambda z: decode(z, esm, tokenizer, stats, args.min_polar)}
     else:
+        if len(set(budgets)) != len(budgets):
+            parser.error("--mut-budget has duplicate values")
         rule = ("argmax" if args.decode_temperature <= 0
                 else f"sampled at T={args.decode_temperature}")
         rule += ", exactly" if args.exact_mutations else ", at most"
-        print(f"  Decoding {rule} {args.mut_budget} substitutions from the "
+        print(f"  Decoding {rule} {budgets} substitutions from the "
               f"{source} reference")
         if frozen:
             print(f"  Frozen positions (never substituted): {list(frozen)}")
-        decode_fn = lambda z: decode_budget(z, esm, tokenizer, stats, reference,
-                                            args.mut_budget, args.decode_temperature,
-                                            frozen, args.exact_mutations, support)
+        if len(budgets) > 1:
+            print(f"  Budget {budgets[0]} drives the saved sequences and FASTA; "
+                  f"{budgets[1:]} are decoded from the same latents for comparison.")
+        # Mutation count is a decode-time choice: the trained model does not
+        # depend on it, so several budgets cost one extra decode each rather than
+        # a retraining apiece. Binding `b` per lambda keeps late binding from
+        # collapsing them all onto the last budget.
+        decode_fns = {
+            b: (lambda z, b=b: decode_budget(z, esm, tokenizer, stats, reference,
+                                             b, args.decode_temperature,
+                                             frozen, args.exact_mutations, support))
+            for b in budgets}
+    primary = next(iter(decode_fns))
+    decode_fn = decode_fns[primary]
 
     anchor = None
     if args.anchor_strength is not None:
@@ -1205,8 +1251,9 @@ def main():
         "samples":         args.samples,
         "max_length":      args.max_length,
         "decode":          "mut_budget" if args.mut_budget is not None else "min_polar",
+        "mut_budgets":     list(budgets) if budgets else None,
         "interpolant":     args.interpolant,
-        "mut_budget":      args.mut_budget,
+        "mut_budget":      primary,
         "decode_temperature": args.decode_temperature,
         "exact_mutations":    args.exact_mutations,
         "restrict_support":   (str(args.restrict_support)
@@ -1224,7 +1271,8 @@ def main():
         "diffusion_steps": args.diffusion_steps,
         "stratified":      args.stratified_timesteps,
         "cfg_weight":      args.cfg_weight,
-        "reward_eta":      args.reward_eta,
+        "reward_eta":      args.reward_eta[0],
+        "reward_etas":     list(args.reward_eta),
         "guidance_clip":   args.guidance_clip,
         "normalize_guidance": args.normalize_guidance,
         "endpoint_guidance":  args.endpoint_guidance,
@@ -1259,11 +1307,24 @@ def main():
                   f"mean hamming to reference {sum(distances)/len(distances):.1f} "
                   f"(min {min(distances)}, max {max(distances)})")
 
+    # Eta is a sampling-time knob, so several values cost one extra sampling pass
+    # each rather than a retraining apiece. The first keeps the bare 'single' and
+    # 'multi' names so every downstream tool reads the run unchanged.
+    def eta_tag(value):
+        return f"{value:g}"
+
     guidance_configs = {
-        "cfg":    dict(c=1, w=args.cfg_weight, eta=0.0,            lambdas=(1., 0.)),
-        "single": dict(c=1, w=0.0,             eta=args.reward_eta, lambdas=(1., 0.)),
-        "multi":  dict(c=1, w=0.0,             eta=args.reward_eta, lambdas=(0.7, 0.3)),
+        "cfg": dict(c=1, w=args.cfg_weight, eta=0.0, lambdas=(1., 0.)),
     }
+    for position, eta in enumerate(args.reward_eta):
+        suffix = "" if position == 0 else f"@{eta_tag(eta)}"
+        guidance_configs[f"single{suffix}"] = dict(c=1, w=0.0, eta=eta,
+                                                   lambdas=(1., 0.))
+        guidance_configs[f"multi{suffix}"] = dict(c=1, w=0.0, eta=eta,
+                                                  lambdas=(0.7, 0.3))
+    if len(args.reward_eta) > 1:
+        print(f"  Sweeping reward eta {args.reward_eta} from one trained model; "
+              f"eta={args.reward_eta[0]} drives the bare 'single'/'multi' arms.")
 
     # ── Flow matching ─────────────────────────────────────────────────────────
     print("\nTraining flow matching model...")
@@ -1276,10 +1337,9 @@ def main():
     for name, cfg in guidance_configs.items():
         z    = sample_flow(flow_model, flow_reward, n=args.samples, **cfg,
                            **anchor_kwargs, **guide_kwargs, **flow_path)
-        seqs = decode_fn(z)
-        scores = score_with_oracle(seqs, oracle)
-        report(name, seqs, scores, z)
-        flow_latents[name] = {"latent": z, "sequences": seqs, "oracle": scores}
+        entry = decode_all_budgets(z, decode_fns, primary, oracle)
+        report(name, entry["sequences"], entry["oracle"], z)
+        flow_latents[name] = entry
     save_results(out_root, "flow", flow_latents, flow_model, flow_reward,
                  stats, model_info["hf_id"], length, dim, args.min_polar, flow_losses,
                  run_config)
@@ -1297,10 +1357,9 @@ def main():
     for name, cfg in guidance_configs.items():
         z    = sample_diffusion(diff_model, diff_reward, alpha_bars, betas, alphas, post_vars,
                                 n=args.samples, **cfg, **anchor_kwargs, **guide_kwargs)
-        seqs = decode_fn(z)
-        scores = score_with_oracle(seqs, oracle)
-        report(name, seqs, scores, z)
-        diff_latents[name] = {"latent": z, "sequences": seqs, "oracle": scores}
+        entry = decode_all_budgets(z, decode_fns, primary, oracle)
+        report(name, entry["sequences"], entry["oracle"], z)
+        diff_latents[name] = entry
     save_results(out_root, "diffusion", diff_latents, diff_model, diff_reward,
                  stats, model_info["hf_id"], length, dim, args.min_polar, diff_losses,
                  run_config)
@@ -1325,6 +1384,27 @@ def main():
                 print(f"  {method:<12}{name:<9}{scores.mean():>9.3f}"
                       f"{scores.max():>9.3f}{distance:>9.1f}"
                       f"{len(set(latent['sequences'])):>4}/{len(latent['sequences'])}")
+        if len(decode_fns) > 1:
+            print("\nSame latents decoded at each mutation budget "
+                  "(brightness is wild-type centered)")
+            head = (f"  {'method':<12}{'mode':<9}{'budget':>7}{'mean':>9}"
+                    f"{'best':>9}{'uniq':>8}")
+            print(head + "\n  " + "-" * (len(head) - 2))
+            for method, latents in (("flow", flow_latents),
+                                    ("diffusion", diff_latents)):
+                for name, latent in latents.items():
+                    for budget, block in latent.get("by_budget", {}).items():
+                        s = block["oracle"]
+                        mean = float("nan") if s is None else s.mean()
+                        best = float("nan") if s is None else s.max()
+                        print(f"  {method:<12}{name:<9}{budget:>7}{mean:>9.3f}"
+                              f"{best:>9.3f}"
+                              f"{len(set(block['sequences'])):>5}/"
+                              f"{len(block['sequences'])}")
+            print("  Brightness falling as the budget rises is the expected "
+                  "cost of mutating more; rising means guidance is finding "
+                  "something the extra positions allow.")
+
         identical = all(
             latents[m]["sequences"] == latents[list(latents)[0]]["sequences"]
             for latents in (flow_latents, diff_latents) for m in latents)
