@@ -9,6 +9,7 @@ __pycache__/
 
 # Generated results and downloaded/trained weights.
 outputs/
+cache/
 esm2_flow_outputs/
 esm2_diffusion_outputs/
 *.pt
@@ -23,3 +24,23 @@ esm2_diffusion_outputs/
 data/
 flow_matching_outputs/
 !lecture_2/flow_unet_mnist.pt
+
+# Folders
+CIS6270/project1_eval/plots
+CIS6270/project1_eval/checkpoints
+CIS6270/project1_eval/logs
+CIS6270/project1_eval/models
+CIS6270/project1_eval/results
+CIS6270/project1_eval/samples
+CIS6270/project1_eval/samples_
+metl/
+Slides/
+
+# .md files
+CIS6270/IDEA.md
+CIS6270/PROJECT_PLAN.md
+PROJECT.md
+IDEA.md
+
+# FODLERS
+scripts/
