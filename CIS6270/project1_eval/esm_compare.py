@@ -63,10 +63,55 @@ PREDICTIONS = {}
 ALPHAS = (1.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0)
 
 
+METL_TASKS = {
+    "in-support":  "splits/standard/standard_tr0.8_tu0.1_te0.1_w1abc2f4e9a64_r3597",
+    "unseen-subs": "splits/mutation/mutation_tr-muts0.8_tu0.1_r4419",
+    "unseen-pos":  "splits/position/position_tr-pos0.8_tu0.1_r6822",
+}
+
+
 def read_split(path):
     rows = list(csv.DictReader(open(path, newline="")))
     return ([r["sequence"].strip().upper() for r in rows],
             np.array([float(r["score"]) for r in rows], dtype=np.float64))
+
+
+def find_dms_root():
+    """METL's avgfp directory, under either checkout name."""
+    for candidate in (ROOT.parent.parent / "metl" / "data" / "dms_data" / "avgfp",
+                      ROOT.parent.parent / "Data_GFP" / "data" / "dms_data" / "avgfp"):
+        if (candidate / "avgfp.tsv").is_file():
+            return candidate
+    raise SystemExit("cannot find METL's dms_data/avgfp directory")
+
+
+def read_metl_task(task, wt):
+    """Load one of METL's split families, which hold row indices into avgfp.tsv.
+
+    These exist because the natural split cannot answer the question that matters
+    here. A random 5% test slice of this assay is 99.3% in-support -- 17 variants
+    carry a substitution the training split never saw -- so it measures
+    interpolation almost exclusively. METL's mutation split instead partitions on
+    the substitutions themselves, so test variants are guaranteed to carry
+    substitutions absent from train, and the position split withholds whole
+    positions. That is where a pretrained representation can beat indicators on
+    something other than a rounding error: an indicator for an unseen
+    substitution has no coefficient at all.
+    """
+    from prepare_gfp import apply_variant
+    dms = find_dms_root()
+    rows = [line.rstrip().split("\t") for line in
+            (dms / "avgfp.tsv").read_text().splitlines()[1:]]
+    out = {}
+    for name, filename in (("train", "train.txt"), ("val", "val.txt"),
+                           ("test", "test.txt")):
+        path = dms / METL_TASKS[task] / filename
+        if not path.is_file():
+            raise SystemExit(f"missing {path}")
+        index = [int(x) for x in path.read_text().split()]
+        out[name] = ([apply_variant(wt, rows[i][0]) for i in index],
+                     np.array([float(rows[i][2]) for i in index], dtype=np.float64))
+    return out
 
 
 def device():
@@ -233,17 +278,28 @@ def main():
                    help="Cap each split, for a fast check before the real run")
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--cache-dir", type=Path, default=ROOT / "cache")
+    p.add_argument("--task", default="stratified",
+                   choices=["stratified"] + list(METL_TASKS),
+                   help="Which split to evaluate on (default: stratified, the "
+                        "80/15/5 partition from split_gfp.py). The METL families "
+                        "withhold substitutions or positions instead of rows, which "
+                        "is the only way to measure extrapolation -- the stratified "
+                        "test set is 99.3%% in-support.")
     p.add_argument("--out", type=Path, default=None)
     args = p.parse_args()
 
     wt = (args.data / "avgfp_wt.txt").read_text().strip()
-    splits = {name: read_split(args.data / f"avgfp_{name}.csv")
-              for name in ("train", "val", "test")}
+    if args.task == "stratified":
+        splits = {name: read_split(args.data / f"avgfp_{name}.csv")
+                  for name in ("train", "val", "test")}
+    else:
+        splits = read_metl_task(args.task, wt)
     if args.limit:
         splits = {k: (s[:args.limit], y[:args.limit]) for k, (s, y) in splits.items()}
     support = support_of(splits["train"][0], wt)
     support[np.arange(len(wt)), [AA_INDEX[a] for a in wt]] = False
-    print(f"\nwild type {len(wt)} residues | ESM-2 model {args.esm}")
+    print(f"\nwild type {len(wt)} residues | ESM-2 model {args.esm} "
+          f"| split: {args.task}")
     for name, (s, _) in splits.items():
         print(f"  {name:<6}{len(s):>7} variants")
     print(f"  train support: {int(support.sum())} of {len(wt)*19} substitutions "
@@ -286,31 +342,41 @@ def main():
             fit_and_score(f"aug(onehot+pca{k})", feats, splits, support, wt, results)
             del feats
         import gc; gc.collect()
-    if len(PREDICTIONS) > 1 and "onehot" in PREDICTIONS:
+    if PREDICTIONS:
         y = splits["test"][1]
         rng = np.random.default_rng(0)
         draws = rng.integers(0, len(y), size=(2000, len(y)))
-        base = PREDICTIONS["onehot"]
-        print(f"\n  paired bootstrap against onehot, 2000 resamples of the same "
-              f"{len(y)} test rows")
-        print(f"  {'model':<20}{'d rho':>9}{'95% interval':>20}{'P(better)':>11}")
-        print("  " + "-" * 60)
+        base = PREDICTIONS.get("onehot")
+        # A constant baseline has no rank correlation to difference against, which
+        # is itself the finding on a withheld-substitution split: indicators have
+        # no coefficient for any substitution in the test set, so ridge returns
+        # its intercept. Report each model's own interval in that case.
+        base_ok = base is not None and np.ptp(base) > 1e-9
+        print(f"\n  bootstrap, 2000 resamples of the same {len(y)} test rows"
+              + ("" if base_ok else "  (onehot is constant — absolute intervals)"))
+        header = f"  {'model':<20}{'test rho':>10}{'95% interval':>20}"
+        if base_ok:
+            header += f"{'d vs onehot':>13}{'P(better)':>11}"
+        print(header + "\n  " + "-" * (len(header) - 2))
         for name, predicted in PREDICTIONS.items():
-            if name == "onehot":
+            if np.ptp(predicted) < 1e-9:
+                print(f"  {name:<20}{'CONSTANT':>10}")
                 continue
-            deltas = np.array([
-                spearmanr(predicted[d], y[d]).statistic
-                - spearmanr(base[d], y[d]).statistic for d in draws])
-            low, high = np.percentile(deltas, [2.5, 97.5])
-            verdict = f"[{low:+.4f}, {high:+.4f}]"
-            print(f"  {name:<20}{deltas.mean():>+9.4f}{verdict:>20}"
-                  f"{100*(deltas > 0).mean():>10.1f}%")
+            rhos = np.array([spearmanr(predicted[d], y[d]).statistic for d in draws])
+            low, high = np.percentile(rhos, [2.5, 97.5])
+            line = f"  {name:<20}{rhos.mean():>10.4f}{f'[{low:.4f}, {high:.4f}]':>20}"
+            record = {"rho_ci95": [round(float(low), 4), round(float(high), 4)]}
+            if base_ok and name != "onehot":
+                deltas = rhos - np.array([spearmanr(base[d], y[d]).statistic
+                                          for d in draws])
+                line += f"{deltas.mean():>+13.4f}{100*(deltas > 0).mean():>10.1f}%"
+                record["delta_rho_vs_onehot"] = round(float(deltas.mean()), 4)
+                record["p_better"] = round(float((deltas > 0).mean()), 4)
+            print(line)
             for row in results:
                 if row["model"] == name:
-                    row["delta_rho_vs_onehot"] = round(float(deltas.mean()), 4)
-                    row["delta_ci95"] = [round(float(low), 4), round(float(high), 4)]
-                    row["p_better"] = round(float((deltas > 0).mean()), 4)
-    out = args.out or args.data / f"esm_compare_{args.esm}.json"
+                    row.update(record)
+    out = args.out or args.data / f"esm_compare_{args.esm}_{args.task}.json"
     out.write_text(json.dumps(results, indent=2) + "\n")
     print(f"\nWrote {out}")
     print("in-supp / off-supp split the SAME test set by whether every substitution\n"
