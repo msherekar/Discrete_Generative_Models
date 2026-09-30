@@ -235,11 +235,64 @@ exact calculations, finite discretizations, and learned approximations.
 Lectures [6](lecture_6/EQUATION_READINGS.md) and [7](lecture_7/EQUATION_READINGS.md)
 also include spoken readings of their equations before the intuition.
 
+## Project code (`src/dgm`)
+
+Project code is an installable package under a `src/` layout, separate from the
+lecture scripts. `uv sync` installs it editable into `.venv`, which puts every
+runnable module on the path as a console script.
+
+```
+src/dgm/
+  common/              shared by every project
+    paths.py           where the repository, artifacts and vendored METL live
+    esm_models.py      the ESM-2 model registry
+  project1/            flow matching vs diffusion on ESM-2 protein latents
+    run_experiment.py  train, sample every guidance arm, save
+    evaluate.py        figures and metric tables
+    embedding_oracle.py  the independent brightness oracle
+    ...
+    pipeline/          experiment stages: encode, train, guide, sample, decode
+    evaluation/        figures and metric tables
+    oracles/           METL and ESM-2 embedding oracles
+    comparison/        cross-model scaling figures
+    diagnostics/       standalone checks on the objective and conditioning
+```
+
+Run a command either way; both work from any directory:
+
+```bash
+uv sync                                     # once, installs dgm editable
+dgm-run-experiment --esm-model esm2_8m --dataset data/avgfp_train_4000.csv
+python -m dgm.project1.run_experiment --list-models
+```
+
+Every module listed above has a console script named after it
+(`dgm-evaluate`, `dgm-gfp-metrics`, `dgm-embedding-oracle`, and so on).
+
+### Where results go
+
+Code no longer sits next to its data, so paths are resolved in
+`dgm.common.paths` rather than from each module's own location. Project 1 reads
+and writes `project1_eval/`:
+
+| Directory | Contents |
+| --- | --- |
+| `project1_eval/data/` | prepared CSVs, splits, wild-type sequences, fitted oracles |
+| `project1_eval/outputs/` | one directory per run: `results.pt` and FASTA files |
+| `project1_eval/plots/` | figures and the metric CSVs behind them |
+| `project1_eval/cache/` | HuggingFace weights, shared by every model and run |
+
+Set `DGM_ROOT` to point the package at a different checkout, or `METL_ROOT` to
+a METL clone elsewhere. A later project adds itself to `_PROJECT_DIRS` in
+`dgm/common/paths.py` and gets the same helpers.
+
 ## Repository organization
 
 | Location | Contents |
 | --- | --- |
 | Repository root | Course index, installation requirements, and license |
+| `src/dgm/` | Installable project code: `common/` plus one package per project |
+| `project1_eval/` | Project 1 artifacts: data, outputs, plots, weight cache, sweep drivers |
 | [`lecture_2/`](https://huggingface.co/ChatterjeeLab/CIS6270/tree/main/lecture_2) | One MNIST flow-matching script, guide, trained checkpoint, and selected example images |
 | [`lecture_3/`](https://huggingface.co/ChatterjeeLab/CIS6270/tree/main/lecture_3) | ESM-2 flow and diffusion guidance scripts, sequence data, guide, and mathematical notes |
 | [`lecture_4/`](https://huggingface.co/ChatterjeeLab/CIS6270/tree/main/lecture_4) | Seven discrete diffusion and guidance examples, synthetic DNA, slide code map, and verified outputs |
