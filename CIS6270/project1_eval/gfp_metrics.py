@@ -123,11 +123,26 @@ def training_set_from_run(run_dir: Path) -> Path | None:
     return None
 
 
+def arms_in(run_dir: Path, method: str) -> list[str]:
+    """Every arm a run actually wrote, base modes first.
+
+    MODES is only the three arms every run has. A sweep adds more -- 'cfg@0',
+    'single@100', 'lam0.5', 'spp99' -- and scoring just the fixed three silently
+    drops them: a run with 26 arms reported 3, which hides the very comparison
+    the sweep was for. So read the directory instead, and keep MODES at the front
+    so the ordering callers expect still holds.
+    """
+    found = sorted(p.stem for p in (run_dir / method).glob("*.fasta"))
+    return [m for m in MODES if m in found] + [m for m in found if m not in MODES]
+
+
 def collect(run_dir: Path, wt: str, oracle, known: set[str],
             embedding=None) -> list[dict]:
     rows = []
     for method in METHODS:
-        for mode in MODES:
+        if not (run_dir / method).is_dir():
+            continue
+        for mode in arms_in(run_dir, method):
             fasta = run_dir / method / f"{mode}.fasta"
             if not fasta.exists():
                 continue
@@ -319,11 +334,27 @@ def main():
               f"Use --exact-mutations in run_experiment.py to remove them.")
     outside   = sum(1 for r in generated if not r["in_domain"])
     if outside:
-        print(f"\nWarning: {outside}/{len(generated)} generated sequences carry more than "
-              f"{domain['max_mutations']} substitutions, beyond what the oracle was fit on. "
-              f"Their brightness is clamped to [{domain['score_min']:.2f}, "
-              f"{domain['score_max']:.2f}] and ranks them no better than 'dead'. "
-              f"Tighten --mut-budget to keep comparisons inside the measured domain.")
+        # in_domain fails on either of two conditions, and they need different
+        # fixes, so say which one actually fired. Reporting the count when the
+        # support check is what failed sends you to --mut-budget, which cannot
+        # help: a run at exactly 5 substitutions is nowhere near the 15 limit.
+        too_many = sum(1 for r in generated
+                       if r["hamming_to_wt"] > domain["max_mutations"])
+        unmeasured = outside - too_many
+        print(f"\nWarning: {outside}/{len(generated)} generated sequences fall outside "
+              f"the oracle's domain. Their brightness is clamped to "
+              f"[{domain['score_min']:.2f}, {domain['score_max']:.2f}] and ranks them "
+              f"no better than 'dead'.")
+        if too_many:
+            print(f"  {too_many} carry more than {domain['max_mutations']} "
+                  f"substitutions. Tighten --mut-budget.")
+        if unmeasured:
+            print(f"  {unmeasured} contain a substitution the assay never measured. "
+                  f"--mut-budget will not help. Either decode with "
+                  f"--restrict-support, or check that --oracle here is the SAME "
+                  f"file the run restricted to: an oracle saved without a recorded "
+                  f"support recovers it from its nonzero coefficients, which is "
+                  f"approximate and reports in-domain sequences as outside it.")
     print(f"\nWrote 2 plots + 2 CSVs to {out_dir}/")
 
 
