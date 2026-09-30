@@ -161,6 +161,92 @@ def encode_metl(sequences: list[str], wt: str, batch_size: int = 64) -> np.ndarr
     return np.concatenate(out)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Rosetta biophysical attributes (METL pretraining head)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# METL-Local's pretraining task is to predict 55 Rosetta biophysical attributes
+# from sequence, and the shipped checkpoint keeps that head intact:
+# `model.prediction.weight` is (55, 256). So the attributes come free with a
+# forward pass -- no Rosetta run, which matters because Rosetta costs ~135-215 s
+# per variant for a 237-residue protein like avGFP (Gelman et al., Nature
+# Methods 2025). Twenty thousand generated sequences would be weeks of CPU.
+#
+# Outputs are in METL's standardized pretraining units (roughly mean 0, sd 1
+# across its simulated variants), not raw Rosetta energies.
+#
+# Measured on 3,000 avgfp_train rows, Spearman against experimental brightness:
+#
+#     0   total_score           -0.6902    most stable <-> brightest
+#    32   pack                  +0.5675
+#     1   fa_atr                -0.5834
+#    41   total_sasa            -0.2541
+#    27   exposed_hydrophobics  -0.1495    near-orthogonal to brightness
+#    43   unsat_hbond           -0.1310    near-orthogonal to brightness
+#
+# total_score is the best stability measure AND the most redundant with
+# brightness, so it belongs in a constraint rather than in a scalarized
+# objective: weighting it against brightness traces a line, not a Pareto front.
+# exposed_hydrophobics and unsat_hbond carry real variance (sd 0.83 and 0.72)
+# while being nearly independent of brightness, which is what a second objective
+# has to be for the tradeoff to mean anything.
+
+ATTRIBUTE_NAMES: tuple[str, ...] = ()
+
+
+def attribute_names() -> tuple[str, ...]:
+    """The 55 attribute names, in the order the prediction head emits them."""
+    global ATTRIBUTE_NAMES
+    if not ATTRIBUTE_NAMES:
+        with metl_imports():
+            import constants
+            ATTRIBUTE_NAMES = tuple(constants.ROSETTA_ATTRIBUTES_TRAINING)
+    return ATTRIBUTE_NAMES
+
+
+def attribute_index(name: str) -> int:
+    """Index of an attribute by name, so callers need not hardcode integers."""
+    names = attribute_names()
+    if name not in names:
+        raise ValueError(f"Unknown Rosetta attribute '{name}'. "
+                         f"Known: {', '.join(names)}")
+    return names.index(name)
+
+
+def metl_attributes(sequences: list[str], wt: str, batch_size: int = 64) -> np.ndarray:
+    """Predicted Rosetta attributes, (len(sequences), 55) in standardized units.
+
+    Reads the pretraining head rather than the pooled fc1 representation that
+    encode_metl() returns. Same frozen checkpoint, same forward pass.
+    """
+    import torch
+    model, encoder = _load_metl()
+    out = []
+    with chdir(METL_ROOT), torch.no_grad():
+        for start in range(0, len(sequences), batch_size):
+            chunk = sequences[start:start + batch_size]
+            variants = [seq_to_variant(s, wt) for s in chunk]
+            x = encoder(encoding="int_seqs", variants=variants,
+                        wt_aa=wt, wt_offset=0)
+            y = model(torch.tensor(x).to(device()), pdb_fn=METL_PDB)
+            out.append(y.detach().cpu().numpy().astype(np.float32))
+    return np.concatenate(out)
+
+
+def metl_attributes_wt(wt: str) -> np.ndarray:
+    """The same 55 attributes for the wild type, as a (55,) vector.
+
+    The stability constraint is expressed relative to this: a design is allowed
+    to be less stable than wild type only by a stated margin delta.
+    """
+    import torch
+    model, encoder = _load_metl()
+    with chdir(METL_ROOT), torch.no_grad():
+        x = encoder(encoding="int_seqs", variants=["_wt"], wt_aa=wt, wt_offset=0)
+        y = model(torch.tensor(x).to(device()), pdb_fn=METL_PDB)
+    return y.detach().cpu().numpy().astype(np.float32)[0]
+
+
 def encode_esm(sequences: list[str], wt: str, tag: str,
                cache_dir: Path | None = None, batch_size: int = 32) -> np.ndarray:
     """Per-residue ESM-2 embedding minus wild type, flattened to keep position."""
