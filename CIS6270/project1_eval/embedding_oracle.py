@@ -187,9 +187,85 @@ def encode_esm(sequences: list[str], wt: str, tag: str,
     return np.concatenate(out)
 
 
-def encode(sequences: list[str], wt: str, backend: str, **kwargs) -> np.ndarray:
+def parse_backend(backend: str):
+    """Split a backend name into (tag, k). 'esm2_8m_pca64' -> ('esm2_8m', 64).
+
+    A bare ESM tag keeps the legacy flattened per-residue delta, which is 237 x d
+    features and needs an iterative solver. The _pca<k> form is the one measured
+    to work: see esm_compare.py, where a 64-component per-position projection beat
+    one-hot indicators on the held-out split by +0.0046 Spearman (paired bootstrap
+    95% interval [+0.0015, +0.0078]), while mean pooling over positions scored
+    0.448 because it discards which position mutated.
+    """
+    if "_pca" in backend:
+        tag, _, k = backend.partition("_pca")
+        return tag, int(k)
+    return backend, None
+
+
+def fit_projection(sequences, wt, tag, k, cache_dir=None, batch_size=32, pca_n=1500):
+    """PCA basis for the per-residue delta, shared across positions.
+
+    Returned as (mean, components) so it can be saved beside the ridge weights --
+    the projection is part of the featurizer, and an oracle that cannot reproduce
+    it cannot score anything.
+    """
+    from sklearn.decomposition import PCA
+    rng = np.random.default_rng(0)
+    pick = rng.choice(len(sequences), min(pca_n, len(sequences)), replace=False)
+    sample = [sequences[i] for i in pick]
+    pooled = np.concatenate([b.reshape(-1, b.shape[-1]) for b in
+                             _stream_delta(sample, wt, tag, cache_dir, batch_size)])
+    pca = PCA(n_components=k, svd_solver="randomized", random_state=0).fit(pooled)
+    kept = float(np.sum(pca.explained_variance_ratio_))
+    print(f"  projection: {k} components, {100*kept:.1f}% of the delta variance")
+    return pca.mean_.astype(np.float32), pca.components_.astype(np.float32)
+
+
+def _stream_delta(sequences, wt, tag, cache_dir=None, batch_size=32):
+    """Yield (batch, length, d) per-residue ESM-2 embeddings minus wild type."""
+    import torch
+    from transformers import AutoTokenizer, EsmForMaskedLM
+    if tag not in ESM_HF:
+        raise ValueError(f"Unknown ESM tag '{tag}'. Known: {', '.join(ESM_HF)}")
+    cache_dir = cache_dir or ROOT / "cache"
+    tokenizer = AutoTokenizer.from_pretrained(ESM_HF[tag], cache_dir=str(cache_dir))
+    model = EsmForMaskedLM.from_pretrained(
+        ESM_HF[tag], cache_dir=str(cache_dir), use_safetensors=True
+    ).to(device()).eval().requires_grad_(False)
+
+    def embed(batch):
+        toks = {k: v.to(device())
+                for k, v in tokenizer(batch, return_tensors="pt").items()}
+        return model.esm(**toks).last_hidden_state[:, 1:-1]
+
+    with torch.no_grad():
+        wt_latent = embed([wt])[0]
+        for start in range(0, len(sequences), batch_size):
+            yield (embed(sequences[start:start + batch_size])
+                   - wt_latent).cpu().numpy().astype(np.float32)
+
+
+def encode_esm_pca(sequences, wt, tag, projection, cache_dir=None, batch_size=32):
+    """Per-position ESM-2 delta projected onto a saved basis: 237 x k features."""
+    mean, components = projection
+    out = []
+    for block in _stream_delta(sequences, wt, tag, cache_dir, batch_size):
+        n, length, _ = block.shape
+        flat = block.reshape(-1, block.shape[-1]) - mean
+        out.append((flat @ components.T).reshape(n, length * len(components)))
+    return np.concatenate(out).astype(np.float32)
+
+
+def encode(sequences: list[str], wt: str, backend: str, projection=None,
+           **kwargs) -> np.ndarray:
     if backend == "metl":
         return encode_metl(sequences, wt, **kwargs)
+    tag, k = parse_backend(backend)
+    if k is not None:
+        if projection is None:
+            raise ValueError(f"backend '{backend}' needs its saved PCA projection")
+        return encode_esm_pca(sequences, wt, tag, projection, **kwargs)
     return encode_esm(sequences, wt, backend, **kwargs)
 
 
@@ -232,7 +308,7 @@ def fit_oracle(sequences, scores, wt, backend, alpha=1.0, val_fraction=0.2, seed
 
 
 def fit_on_splits(train, val, test, wt, backend,
-                  alphas=(0.1, 0.3, 1.0, 3.0, 10.0, 30.0)):
+                  alphas=(1.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0)):
     """Fit on train, choose the ridge penalty on val, report once on test.
 
     A dense representation has no sparse support to worry about -- METL and ESM
@@ -241,8 +317,11 @@ def fit_on_splits(train, val, test, wt, backend,
     somewhere that is not the test set, and the stratified partition keeps the
     mutation-count profile of all three slices matched to the assay.
     """
-    train_x = encode(train[0], wt, backend)
-    val_x = encode(val[0], wt, backend)
+    tag, k = parse_backend(backend)
+    projection = (None if k is None
+                  else fit_projection(train[0], wt, tag, k))
+    train_x = encode(train[0], wt, backend, projection=projection)
+    val_x = encode(val[0], wt, backend, projection=projection)
     print(f"  selecting the ridge penalty on {len(val[0])} validation variants")
     tried = []
     for alpha in alphas:
@@ -259,27 +338,42 @@ def fit_on_splits(train, val, test, wt, backend,
               f"MAE {stats['mae']:.4f}"
               + ("  <-- chosen" if candidate is best else ""))
     model, alpha, val_stats = best
-    predicted = model.predict(encode(test[0], wt, backend))
+    predicted = model.predict(encode(test[0], wt, backend, projection=projection))
     test_stats = {"rho": float(spearmanr(predicted, test[1]).statistic),
                   "mae": float(np.abs(predicted - test[1]).mean()),
                   "n": len(test[0])}
     domain = {"score_min": float(train[1].min()), "score_max": float(train[1].max())}
-    return model, alpha, {"val": val_stats, "test": test_stats}, domain, train_x.shape[1]
+    return (model, alpha, {"val": val_stats, "test": test_stats}, domain,
+            train_x.shape[1], projection)
 
 
-def save_oracle(path: Path, model, wt, backend, rho, mae, domain, n_features):
+def save_oracle(path: Path, model, wt, backend, rho, mae, domain, n_features,
+                projection=None):
     path.parent.mkdir(parents=True, exist_ok=True)
+    extra = {}
+    if projection is not None:
+        # The projection is half the featurizer; an oracle saved without it can
+        # load but cannot score.
+        extra = {"pca_mean": projection[0], "pca_components": projection[1]}
     np.savez(path, coef=model.coef_.astype(np.float32),
              intercept=np.float32(model.intercept_), wt=wt, backend=backend,
              rho=rho, mae=mae, n_features=n_features,
-             score_min=domain["score_min"], score_max=domain["score_max"])
+             score_min=domain["score_min"], score_max=domain["score_max"], **extra)
 
 
 def load_oracle(path: Path):
-    """Return (coef, intercept, wt, backend, domain)."""
+    """Return (coef, intercept, wt, backend, domain).
+
+    A PCA-projected backend carries its projection in `domain["projection"]`, so
+    the returned tuple stays the shape every caller already expects.
+    """
     saved = np.load(path, allow_pickle=False)
+    projection = None
+    if "pca_components" in saved.files:
+        projection = (saved["pca_mean"], saved["pca_components"])
     domain = {"score_min": float(saved["score_min"]),
-              "score_max": float(saved["score_max"])}
+              "score_max": float(saved["score_max"]),
+              "projection": projection}
     return (saved["coef"], float(saved["intercept"]), str(saved["wt"]),
             str(saved["backend"]), domain)
 
@@ -292,7 +386,8 @@ def score_sequences(sequences: list[str], oracle, clip: bool = True) -> np.ndarr
     the measured score range, which is the only range the label means anything in.
     """
     coef, intercept, wt, backend, domain = oracle
-    features = encode(list(sequences), wt, backend)
+    features = encode(list(sequences), wt, backend,
+                      projection=domain.get("projection"))
     predicted = features @ coef + intercept
     if clip:
         predicted = predicted.clip(domain["score_min"], domain["score_max"])
@@ -349,10 +444,10 @@ def main():
             train = (train[0][:args.limit], train[1][:args.limit])
         print(f"\nFitting the {args.backend} oracle on {len(train[0])} "
               f"training variants...")
-        model, alpha, stats, domain, n_features = fit_on_splits(
+        model, alpha, stats, domain, n_features, projection = fit_on_splits(
             train, val, test, wt, args.backend)
         save_oracle(out, model, wt, args.backend, stats["val"]["rho"],
-                    stats["val"]["mae"], domain, n_features)
+                    stats["val"]["mae"], domain, n_features, projection)
         print(f"\n  representation: {n_features} features")
         print(f"  chosen penalty alpha = {alpha}")
         for name in ("val", "test"):
