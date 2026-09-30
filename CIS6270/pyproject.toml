@@ -26,8 +26,38 @@ dependencies = [
     "sqlalchemy>=2.0",
 ]
 
+# Every runnable module gets a console script, so a command works from any
+# directory once `uv sync` has installed the package. The same modules always
+# work as `python -m dgm.project1.<name>` without installing anything.
+[project.scripts]
+dgm-run-experiment     = "dgm.project1.run_experiment:main"
+dgm-evaluate           = "dgm.project1.evaluate:main"
+dgm-embedding-oracle   = "dgm.project1.embedding_oracle:main"
+dgm-compare-models     = "dgm.project1.compare_models:main"
+dgm-gfp-metrics        = "dgm.project1.gfp_metrics:main"
+dgm-gfp-oracle         = "dgm.project1.gfp_oracle:main"
+dgm-resample-cfg       = "dgm.project1.resample_cfg:main"
+dgm-run-mnist          = "dgm.project1.run_mnist:main"
+dgm-prepare-gfp        = "dgm.project1.prepare_gfp:main"
+dgm-split-gfp          = "dgm.project1.split_gfp:main"
+dgm-add-properties     = "dgm.project1.add_properties:main"
+dgm-analyze-sweep      = "dgm.project1.analyze_sweep:main"
+dgm-compute-fid        = "dgm.project1.compute_fid:main"
+dgm-esm-compare        = "dgm.project1.esm_compare:main"
+dgm-oracle-sweep       = "dgm.project1.oracle_sweep:main"
+dgm-plot-guidance-sweep = "dgm.project1.plot_guidance_sweep:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dgm"]
+
+# The project is now an installable package (src/dgm), not just a dependency
+# set, so uv installs it editable into .venv and the console scripts appear.
 [tool.uv]
-package = false
+package = true
 
 # GB10 reports sm_121; official cu130 wheels ship sm_120 (binary-compatible).
 [tool.uv.sources]
