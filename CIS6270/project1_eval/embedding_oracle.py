@@ -308,7 +308,8 @@ def fit_oracle(sequences, scores, wt, backend, alpha=1.0, val_fraction=0.2, seed
 
 
 def fit_on_splits(train, val, test, wt, backend,
-                  alphas=(1.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0)):
+                  alphas=(0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0,
+                          300.0, 1000.0, 3000.0)):
     """Fit on train, choose the ridge penalty on val, report once on test.
 
     A dense representation has no sparse support to worry about -- METL and ESM

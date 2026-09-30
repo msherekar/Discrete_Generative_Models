@@ -60,7 +60,8 @@ ESM_HF = {"esm2_8m": "facebook/esm2_t6_8M_UR50D",
           "esm2_150m": "facebook/esm2_t30_150M_UR50D",
           "esm2_650m": "facebook/esm2_t33_650M_UR50D"}
 PREDICTIONS = {}
-ALPHAS = (1.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0)
+ALPHAS = (0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0,
+          300.0, 1000.0, 3000.0)
 
 
 METL_TASKS = {
@@ -271,7 +272,8 @@ def main():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--models", nargs="+",
                    default=["onehot", "meanpool", "aaemb", "pca16", "aug"],
-                   help="onehot, meanpool, aaemb, pca<k> for any k, aug (onehot+pca<k>)")
+                   help="onehot, metl, meanpool, aaemb, pca<k> for any k, "
+                        "aug (onehot+pca<k>)")
     p.add_argument("--esm", default="esm2_150m", choices=list(ESM_HF))
     p.add_argument("--data", type=Path, default=ROOT / "data")
     p.add_argument("--limit", type=int, default=None,
@@ -325,6 +327,19 @@ def main():
         elif model == "meanpool":
             feats = {n: v[:, :, :16].mean(1) for n, v in full.items()}
             fit_and_score("meanpool(k=16)", feats, splits, support, wt, results)
+        elif model == "metl":
+            # The independence argument for METL: the generator samples in ESM-2
+            # latents and decodes with ESM-2's LM head, so an ESM-2 oracle shares
+            # a representation with the thing it is judging. A direction that
+            # ESM-2 encodes oddly would be both easy for guidance to reach and
+            # easy for an ESM-2 oracle to misscore, in the same direction -- a
+            # correlated failure that reads as success. METL shares no
+            # architecture, tokenizer or pretraining corpus with ESM-2, so its
+            # score is external evidence rather than the generator grading itself.
+            from embedding_oracle import encode_metl
+            feats = {n: encode_metl(s, wt) for n, (s, _) in splits.items()}
+            fit_and_score("METL (fc1)", feats, splits, support, wt, results)
+            del feats
         elif model == "aaemb":
             feats = {n: aa_embedding_features(s, wt, args.esm, args.cache_dir)
                      for n, (s, _) in splits.items()}
