@@ -27,7 +27,7 @@ metl/
 Data_GFP/
 scripts/
 papers/
-lecture/
+
 
 # Course slide PDFs (68 MB, not our work)
 Slides/
@@ -38,3 +38,5 @@ CIS6270/project1_eval/plots/
 
 CLAUDE.md
 uv.lock
+
+CIS6270/osg/jobs
