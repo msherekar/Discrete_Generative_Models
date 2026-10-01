@@ -1,9 +1,0 @@
-{
-  "method": "sf2m",
-  "sampling_seed": 109,
-  "samples": 128,
-  "mean": 1.9728459119796753,
-  "variance": 1.0885781049728394,
-  "approximation": "Euler SDE; boundary times extrapolate beyond the training interval [0.02,0.98].",
-  "finite_values": true
-}

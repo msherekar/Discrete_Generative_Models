@@ -1,9 +1,0 @@
-{
-  "method": "dsbm",
-  "sampling_seed": 108,
-  "samples": 128,
-  "mean": 2.001371307975769,
-  "variance": 1.1673416280099134,
-  "endpoint_covariance": 0.839279412215064,
-  "finite_values": true
-}

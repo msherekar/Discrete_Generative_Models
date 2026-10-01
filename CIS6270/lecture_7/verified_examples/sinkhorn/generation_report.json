@@ -1,9 +1,0 @@
-{
-  "method": "sinkhorn",
-  "sampling_seed": 6370,
-  "samples": 128,
-  "coupling": "entropic_plan",
-  "exact_expected_cost": 3.4550204149387156,
-  "sampled_average_cost": 3.6875,
-  "finite_values": true
-}

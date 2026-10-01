@@ -1,3 +1,0 @@
-# Match the course's PyTorch baseline; torch.func.jvp is required.
-torch==2.9.1
-numpy>=1.24,<3

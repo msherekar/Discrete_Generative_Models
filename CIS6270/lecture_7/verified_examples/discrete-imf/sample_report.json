@@ -1,8 +1,0 @@
-{
-  "method": "discrete-imf",
-  "sampling_seed": 6370,
-  "samples": 128,
-  "terminal_probability_one": 0.796875,
-  "path_l1_to_exact_bridge": 1.3813603039203315e-13,
-  "finite_values": true
-}

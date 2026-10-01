@@ -1,8 +1,0 @@
-{
-  "method": "csbm",
-  "sampling_seed": 114,
-  "samples": 128,
-  "terminal_probability_one": 0.75,
-  "target_probability_one": 0.8,
-  "finite_values": true
-}

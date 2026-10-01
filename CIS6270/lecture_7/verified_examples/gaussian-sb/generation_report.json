@@ -1,9 +1,0 @@
-{
-  "method": "gaussian-sb",
-  "sampling_seed": 6370,
-  "samples": 128,
-  "mean": 1.960704398899697,
-  "variance": 1.1153284189014088,
-  "sampler": "Exact Gaussian endpoint coupling plus Brownian conditional bridges on the grid.",
-  "finite_values": true
-}
