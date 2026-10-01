@@ -12,6 +12,7 @@ osg/
     dgm-gpu-cuda126.def    fallback: OSG Rocky 9 + CUDA 12.6, torch pinned here
   bin/
     stage.sh               build the three input tarballs
+    prep_run.sh            create a run's OSDF output folder before submitting
     fetch_esm_weights.py   populate a weight cache for staging
   jobs/
     run_experiment.sub     one run
@@ -89,9 +90,18 @@ cp dgm-gpu-v1.sif /ospool/$AP/data/$USER/
 In both `jobs/run_experiment.sub` and `jobs/sweep.sub`:
 
 ```
-OSG_USER = your_username
-OSG_AP   = ap40          # whichever access point you log into
+OSG_USER = mukul.sherekar
+OSG_AP   = ap40
+
+OSDF_IMAGE = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/containers
+OSDF_RUNS  = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/runs
+OSDF_DATA  = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/data
 ```
+
+Three locations, not one. `OSDF_IMAGE` is read by every job; `OSDF_RUNS`
+receives each run's heavy outputs; `OSDF_DATA` is only for weight caches too
+big to transfer. Collapsing these into a single variable is what sent the first
+smoke run's `results.pt` to `containers/runs/`.
 
 ## Running
 
@@ -101,7 +111,8 @@ bash ../osg/bin/stage.sh --model esm2_8m \
     --data data/avgfp_train_props.csv data/avgfp_wt.txt data/avgfp_oracle_v2.npz
 
 cd ../osg/jobs
-condor_submit run_experiment.sub
+OSG_AP=ap40 OSG_USER=$USER bash ../bin/prep_run.sh long250_20261001
+condor_submit run_experiment.sub -append 'TAG = long250_20261001'
 condor_q
 ```
 
@@ -129,15 +140,15 @@ the params file.
 
 ## Resource requests, measured
 
-Taken from the long250 config on `avgfp_train_props.csv` (41372 sequences,
-batch 128, transformer `--hidden 256`, 100 samples, 12 arms) on the GB10.
+Measured locally on the GB10, then **confirmed against a real OSPool run** on
+an L40 at NCSU-OSG-CE1 (job 15833608).
 
 | Request | Value | Why |
 | --- | --- | --- |
-| `request_cpus` | 2 | Peak 1.4 cores. The run is GPU-bound; the host thread does data loading and the encode loop. |
-| `request_memory` | 32GB | Peak RSS 24.8 GiB. The standardized latent tensor alone is 41372x237x320x4 = 11.7 GiB, and encoding holds working copies of it. |
-| `gpus_minimum_memory` | 12G | Peak 6.9 GiB reserved, during training at batch 128 — sampling is lighter. 12G leaves headroom and matches more nodes than 16G. |
-| `request_disk` | 16GB | `results.pt` is 386 MB per modality (~780 MB per run), inputs ~100 MB unpacked, and the `.sif` is several GB if it is staged into the sandbox. |
+| `request_cpus` | 2 | Confirmed usage 1.99 of 2 on the L40 — saturated. The job is **CPU**-bound, not GPU-bound: `GPUs usage` was 0.06. Try 4 and compare `TimeExecute`. |
+| `request_memory` | 32GB | Confirmed 24,861 MB used. The standardized latent tensor alone is 41372x237x320x4 = 11.7 GiB, and encoding holds working copies. 16GB would have been killed. |
+| `gpus_minimum_memory` | 12G | Peak 6.9 GiB reserved during training at batch 128. Condor reported only 1,282 MB for the smoke run — it samples periodically and caught the encode phase. Do not trust that figure. |
+| `request_disk` | 16GB | Confirmed 9.0 GiB used, essentially all of it the ~8.8 GiB `.sif`. **The image is the disk request**; data is noise beside it. |
 
 Note the GB10 has **unified** memory — `nvidia-smi` reports `memory.total` as
 `[N/A]` because GPU and host share one 119 GB pool. "It fits locally" therefore
@@ -163,25 +174,73 @@ submitting, or implement checkpointing if you need all 250.
 
 ## What comes back, and where
 
+Two separate OSDF locations, set at the top of each submit file. Keeping them
+apart matters: the first smoke run wrote its `results.pt` under
+`containers/runs/` because one variable was serving both purposes.
+
+```
+/ospool/ap40/data/mukul.sherekar/
+  containers/
+    dgm-gpu-v1.sif              <- OSDF_IMAGE, read by every job
+  DGM/
+    data/                       <- OSDF_DATA, for weight caches over ~1 GB
+    runs/                       <- OSDF_RUNS, one folder per run
+      long250_20261001/
+        flow_results.pt
+        diffusion_results.pt
+        manifest.txt
+```
+
+One folder per `TAG`, so `results.pt` keeps its plain name and the folder
+identifies the run. `manifest.txt` travels with them so a folder is readable on
+its own months later:
+
+```
+tag          long250_20261001
+finished     2026-10-01T20:55:41Z
+host         vcledch0201.hpc.ncsu.edu
+glidein_site NCSU-OSG-CE1
+gpu          NVIDIA L40, 570.158.01, 46068 MiB
+torch        2.3.1
+capability   (8, 9)
+flags        --esm-model esm2_8m --dataset data/avgfp_train_props.csv ...
+
+files
+  flow_results.pt  386M
+  diffusion_results.pt  389M
+```
+
 | Artifact | Size | Destination |
 | --- | --- | --- |
 | `<tag>.tar.gz` — FASTA, run config, plots, log | ~1 MB | access point, `jobs/` |
-| `<tag>_flow_results.pt` | 200–400 MB | `osdf:///ospool/<ap>/data/<user>/runs/` |
-| `<tag>_diffusion_results.pt` | 200–400 MB | same |
+| `flow_results.pt`, `diffusion_results.pt` | 386 MB each | `DGM/runs/<tag>/` |
+| `manifest.txt` | <1 KB | `DGM/runs/<tag>/` |
 
-`results.pt` holds the latents and model weights, which is what makes
-`dgm-resample-cfg` and re-decoding at another mutation budget possible later —
-worth keeping, too big to pile up in `/home`. It goes to OSDF through
-`transfer_output_remaps`, which is the supported mechanism; do not call
-`stashcp` from the job.
+### Create the folder before submitting
 
-Unpack a finished run:
+`transfer_output_remaps` writes files into a path but does not reliably create
+the intermediate directories, and `/ospool` is mounted on the access point, so:
 
 ```bash
-tar -xzf long250.tar.gz                       # -> results/long250/{flow,diffusion}
-cp /ospool/$AP/data/$USER/runs/long250_flow_results.pt \
-   results/long250/flow/results.pt
+OSG_AP=ap40 OSG_USER=mukul.sherekar bash ../bin/prep_run.sh long250_20261001
 ```
+
+It also refuses a tag that already holds results, because **OSDF caches by
+path** — reusing a tag can serve the previous run's file to a later read. Date-
+stamp or version every tag.
+
+### Unpacking a finished run
+
+```bash
+tar -xzf long250_20261001.tar.gz        # -> results/long250_20261001/{flow,diffusion}
+R=/ospool/ap40/data/$USER/DGM/runs/long250_20261001
+cp $R/flow_results.pt      results/long250_20261001/flow/results.pt
+cp $R/diffusion_results.pt results/long250_20261001/diffusion/results.pt
+```
+
+`results.pt` holds the latents and weights, which is what makes
+`dgm-resample-cfg` and re-decoding at another mutation budget possible later —
+worth keeping, too big to pile up in `/home`.
 
 ## Scoring
 
@@ -260,6 +319,16 @@ memory first.
 **`no staged ESM weights` warning in the log.** The weight tarball did not
 arrive, and the job then tried to download with `HF_HUB_OFFLINE=1` set and
 failed. Re-run `stage.sh`.
+
+**`results.pt` is not in OSDF.** Check `OSDF_RUNS` in the submit file actually
+points where you think, and that the run folder exists — `prep_run.sh` creates
+it. Look under `containers/runs/` too: that is where it lands if `OSDF_IMAGE`
+and `OSDF_RUNS` have been collapsed into one variable.
+
+**GPU utilization near zero.** Expected on short jobs — encoding is CPU-bound
+and dominates them. On a 250-epoch run training should dominate; if `GPUs usage`
+is still low there, the bottleneck is `load_data`'s batch-16 encode loop, and
+the fix is in the code, not the submit file.
 
 **A zero-byte `results.pt`.** That modality did not finish. Both file names are
 always created because Condor fails the entire transfer — losing the small

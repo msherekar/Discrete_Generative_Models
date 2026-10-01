@@ -10,7 +10,14 @@
 # ── identity: the two values that are yours ──────────────────────────────────
 OSG_USER = mukul.sherekar
 OSG_AP   = ap40
-OSDF     = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/containers
+
+# Two separate locations, deliberately. One variable for both is how the first
+# smoke run's results.pt ended up under containers/runs/ instead of DGM/runs/.
+#   OSDF_IMAGE  where the .sif lives, read on every job
+#   OSDF_RUNS   where this run's heavy outputs are written
+OSDF_IMAGE = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/containers
+OSDF_RUNS  = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/runs
+OSDF_DATA  = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/data
 
 # Bump on every image rebuild: OSDF caches aggressively by file name.
 IMAGE_VERSION = v1
@@ -46,7 +53,7 @@ RUN_ARGS = --esm-model esm2_8m \
 # container_image takes no quotes, and the .sif must NOT appear under
 # transfer_input_files -- Condor stages it for you.
 universe        = container
-container_image = $(OSDF)/dgm-gpu-$(IMAGE_VERSION).sif
+container_image = $(OSDF_IMAGE)/dgm-gpu-$(IMAGE_VERSION).sif
 
 executable = run_experiment.sh
 arguments  = "$(TAG) $(RUN_ARGS)"
@@ -55,7 +62,7 @@ arguments  = "$(TAG) $(RUN_ARGS)"
 # All three sit well under the 1 GB mark above which OSG asks for OSDF:
 # code ~1 MB, this run's data ~13 MB, esm2_8m weights ~30 MB.
 # For esm2_650m (2.5 GB) or bigger, drop esm-cache.tar.gz and use instead:
-#   transfer_input_files = dgm-src.tar.gz, inputs.tar.gz, $(OSDF)/esm-cache/?recursive
+#   transfer_input_files = dgm-src.tar.gz, inputs.tar.gz, $(OSDF_DATA)/esm-cache/?recursive
 transfer_input_files = dgm-src.tar.gz, inputs.tar.gz, esm-cache.tar.gz
 
 # ── output ───────────────────────────────────────────────────────────────────
@@ -63,15 +70,24 @@ transfer_input_files = dgm-src.tar.gz, inputs.tar.gz, esm-cache.tar.gz
 # remapped into OSDF so they never land on the access point.
 should_transfer_files   = YES
 when_to_transfer_output = ON_EXIT
-transfer_output_files   = $(TAG).tar.gz, $(TAG)_flow_results.pt, $(TAG)_diffusion_results.pt
-transfer_output_remaps  = "$(TAG)_flow_results.pt = $(OSDF)/runs/$(TAG)_flow_results.pt; $(TAG)_diffusion_results.pt = $(OSDF)/runs/$(TAG)_diffusion_results.pt"
+transfer_output_files   = $(TAG).tar.gz, $(TAG)_flow_results.pt, $(TAG)_diffusion_results.pt, $(TAG)_manifest.txt
+transfer_output_remaps  = "$(TAG)_flow_results.pt = $(OSDF_RUNS)/$(TAG)/flow_results.pt; $(TAG)_diffusion_results.pt = $(OSDF_RUNS)/$(TAG)/diffusion_results.pt; $(TAG)_manifest.txt = $(OSDF_RUNS)/$(TAG)/manifest.txt"
 
 # ── resources ────────────────────────────────────────────────────────────────
-# Measured on the GB10, running the long250 config on avgfp_train_props.csv.
-#   peak host RSS      24.8 GiB  (the 41372x237x320 latent tensor alone is 11.7)
-#   peak GPU reserved    6.9 GiB  (training at batch 128 dominates sampling)
-#   peak CPU             1.4 cores
-#   results.pt           386 MB per modality, so ~780 MB per run
+# CONFIRMED against a real OSPool run on an L40 (job 15833608, NCSU-OSG-CE1):
+#   Memory  usage 24,861 MB of 32,768 requested   <- 16GB would have been killed
+#   Cpus    usage 1.99 of 2                       <- saturated; see the note below
+#   Disk    usage 9.0 GiB of 16 GiB               <- the .sif IS the disk request
+#   GPUs    usage 0.06                            <- 6%: the job is CPU-bound
+#
+# request_disk is dominated by the container image, not by the data: that run
+# received 9.51 GB, essentially all of it the ~8.8 GiB .sif. Inputs are 21 MB
+# and outputs ~780 MB for a full 100-sample run.
+#
+# Cpus sat at 1.99 of 2 while the GPU idled at 6%, because load_data encodes at
+# the module-level BATCH_SIZE of 16 in a plain Python loop with no DataLoader
+# workers. Raising this to 4 is cheap and worth one A/B against TimeExecute; it
+# matters less on a 250-epoch run, where training rather than encoding dominates.
 request_gpus   = 1
 request_cpus   = 2
 request_memory = 32GB
@@ -79,8 +95,12 @@ request_disk   = 16GB
 
 # The image's cu118 wheels cover sm_70 to sm_90: V100, A100, A40, L40S.
 # Ruling out older cards avoids matching a node that cannot run them at all.
+# Matched an L40 (Capability 8.9, 45 GB) on the first real run.
 require_gpus        = (Capability >= 7.0)
-# 6.9 GiB measured, so 12G leaves headroom while matching more nodes than 16G.
+# 6.9 GiB measured with torch.cuda.max_memory_reserved(). Condor reported only
+# 1,282 MB for the smoke run, but it samples nvidia-smi periodically and caught
+# the encode phase rather than transformer training -- do not lower this to match
+# that number.
 gpus_minimum_memory = 12G
 
 # MEASURED, and important: the full 250-epoch long250 config ran over 21 hours

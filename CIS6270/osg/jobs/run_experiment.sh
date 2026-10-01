@@ -143,6 +143,42 @@ for method in flow diffusion; do
     fi
 done
 
+# A manifest beside the results in OSDF, so a run folder months from now says
+# what it is without needing the tarball: which node, which GPU, which flags.
+MANIFEST="${TAG}_manifest.txt"
+{
+    echo "tag          $TAG"
+    echo "finished     $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+    echo "host         $(hostname)"
+    # ClusterId.ProcId, read out of the job ad Condor drops in the sandbox.
+    if [ -n "${_CONDOR_JOB_AD:-}" ] && [ -f "${_CONDOR_JOB_AD}" ]; then
+        echo "condor_job   $(awk -F' = ' '/^ClusterId/{c=$2} /^ProcId/{p=$2} END{print c"."p}' \
+                             "${_CONDOR_JOB_AD}")"
+    fi
+    echo "glidein_site ${GLIDEIN_ResourceName:-unknown}"
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        echo "gpu          $(nvidia-smi --query-gpu=name,driver_version,memory.total \
+                             --format=csv,noheader | head -1)"
+    fi
+    # Versions only: a peak-memory figure would read 0 here, since this is a
+    # fresh interpreter and not the process that did the training.
+    "$PY" - <<'PY' 2>/dev/null || true
+import torch
+print(f"torch        {torch.__version__}")
+if torch.cuda.is_available():
+    print(f"capability   {torch.cuda.get_device_capability(0)}")
+PY
+    echo "flags        $*"
+    echo
+    echo "files"
+    for method in flow diffusion; do
+        f="${TAG}_${method}_results.pt"
+        [ -s "$f" ] && echo "  ${method}_results.pt  $(du -h "$f" | cut -f1)" \
+                    || echo "  ${method}_results.pt  MISSING (that modality did not finish)"
+    done
+} > "$MANIFEST"
+say "staged $MANIFEST"
+
 # Everything small, including any --plot figures, which land under
 # project1_eval/plots rather than --outdir.
 PLOTS_REL=""
