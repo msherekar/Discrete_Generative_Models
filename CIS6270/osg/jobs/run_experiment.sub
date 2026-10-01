@@ -67,19 +67,32 @@ transfer_output_files   = $(TAG).tar.gz, $(TAG)_flow_results.pt, $(TAG)_diffusio
 transfer_output_remaps  = "$(TAG)_flow_results.pt = $(OSDF)/runs/$(TAG)_flow_results.pt; $(TAG)_diffusion_results.pt = $(OSDF)/runs/$(TAG)_diffusion_results.pt"
 
 # ── resources ────────────────────────────────────────────────────────────────
+# Measured on the GB10, running the long250 config on avgfp_train_props.csv.
+#   peak host RSS      24.8 GiB  (the 41372x237x320 latent tensor alone is 11.7)
+#   peak GPU reserved    6.9 GiB  (training at batch 128 dominates sampling)
+#   peak CPU             1.4 cores
+#   results.pt           386 MB per modality, so ~780 MB per run
 request_gpus   = 1
 request_cpus   = 2
-request_memory = 16GB
-request_disk   = 20GB
+request_memory = 32GB
+request_disk   = 16GB
 
 # The image's cu118 wheels cover sm_70 to sm_90: V100, A100, A40, L40S.
 # Ruling out older cards avoids matching a node that cannot run them at all.
 require_gpus        = (Capability >= 7.0)
-gpus_minimum_memory = 16G
+# 6.9 GiB measured, so 12G leaves headroom while matching more nodes than 16G.
+gpus_minimum_memory = 12G
 
-# A 250-epoch run finishes inside 10 hours. If a job is ever held for running
-# long, raise this to "Long" (<= 20 h) and expect fewer eligible nodes.
-+JobDurationCategory = "Medium"
+# MEASURED, and important: the full 250-epoch long250 config ran over 21 hours
+# on the GB10 and was still sampling. That exceeds BOTH OSPool categories --
+# "Medium" is 10 h, "Long" is 20 h -- so 250 epochs cannot complete as a single
+# OSPool job. The job will be held.
+#
+# The loss curve says those epochs buy little past the halfway point: flow went
+# 0.3733 at epoch 124 to 0.3156 at 250, diffusion 0.1808 to 0.1663. Halving to
+# --epochs 125 lands near 10.5 h, which fits "Long" with margin. Reduce
+# --epochs above before submitting.
++JobDurationCategory = "Long"
 
 # ── logging and retries ──────────────────────────────────────────────────────
 output = logs/$(TAG).$(ClusterId).$(ProcId).out

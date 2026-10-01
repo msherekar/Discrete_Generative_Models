@@ -127,6 +127,40 @@ That split is forced by HTCondor: `queue ... from` splits each line on commas,
 so a value containing a comma — `--freeze-positions 63,64,65` — cannot live in
 the params file.
 
+## Resource requests, measured
+
+Taken from the long250 config on `avgfp_train_props.csv` (41372 sequences,
+batch 128, transformer `--hidden 256`, 100 samples, 12 arms) on the GB10.
+
+| Request | Value | Why |
+| --- | --- | --- |
+| `request_cpus` | 2 | Peak 1.4 cores. The run is GPU-bound; the host thread does data loading and the encode loop. |
+| `request_memory` | 32GB | Peak RSS 24.8 GiB. The standardized latent tensor alone is 41372x237x320x4 = 11.7 GiB, and encoding holds working copies of it. |
+| `gpus_minimum_memory` | 12G | Peak 6.9 GiB reserved, during training at batch 128 — sampling is lighter. 12G leaves headroom and matches more nodes than 16G. |
+| `request_disk` | 16GB | `results.pt` is 386 MB per modality (~780 MB per run), inputs ~100 MB unpacked, and the `.sif` is several GB if it is staged into the sandbox. |
+
+Note the GB10 has **unified** memory — `nvidia-smi` reports `memory.total` as
+`[N/A]` because GPU and host share one 119 GB pool. "It fits locally" therefore
+says nothing about a discrete GPU's VRAM, which is why the GPU figure above
+comes from `torch.cuda.max_memory_reserved()` rather than from `nvidia-smi`.
+
+### Runtime: 250 epochs does not fit
+
+The full 250-epoch run took **over 21 hours** on the GB10 and was still
+sampling. OSPool offers `"Medium"` (10 h) and `"Long"` (20 h), so this config
+cannot complete as a single job.
+
+The loss curve shows the second half buys little:
+
+| | epoch 124 | epoch 250 |
+| --- | --- | --- |
+| flow | 0.3733 | 0.3156 |
+| diffusion | 0.1808 | 0.1663 |
+
+`--epochs 125` lands near 10.5 h, inside `"Long"` with margin. Both submit
+files are set to `"Long"` and carry this warning; reduce `--epochs` before
+submitting, or implement checkpointing if you need all 250.
+
 ## What comes back, and where
 
 | Artifact | Size | Destination |
