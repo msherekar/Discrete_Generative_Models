@@ -34,7 +34,8 @@ From: hub.opensciencegrid.org/htc/pytorch:2.3.1-cuda11.8
         "numpy>=1.24" \
         "scipy>=1.10" \
         "scikit-learn>=1.7.2" \
-        "matplotlib>=3.8"
+        "matplotlib>=3.8" \
+        "wandb>=0.19"
 
 %environment
     # Weights are pre-staged by the job; never reach for the network mid-run.
@@ -46,11 +47,12 @@ From: hub.opensciencegrid.org/htc/pytorch:2.3.1-cuda11.8
 %test
     # Fails the build rather than every job if a pin is incompatible.
     python - <<'PY'
-import matplotlib, numpy, scipy, sklearn, torch, transformers
+import matplotlib, numpy, scipy, sklearn, torch, transformers, wandb
 print("torch       ", torch.__version__)
 print("transformers", transformers.__version__)
 print("numpy       ", numpy.__version__)
 print("scipy       ", scipy.__version__)
 print("sklearn     ", sklearn.__version__)
 print("matplotlib  ", matplotlib.__version__)
+print("wandb       ", wandb.__version__)
 PY

@@ -123,6 +123,26 @@ say "running: $* --outdir $OUT ${ORACLE_FLAG[*]:-}"
     --outdir "$OUT" "${ORACLE_FLAG[@]:-}"
 say "run finished"
 
+# ── optional: W&B, offline ───────────────────────────────────────────────────
+# Opt-in, because the node holds no W&B credentials and an older image may not
+# carry wandb at all. When enabled this writes an offline run into the results
+# directory, which the tarball carries home -- so `wandb sync` on the access
+# point registers the run without downloading the 386 MB results.pt just to log
+# it. Must happen here, before packaging moves results.pt out of $OUT.
+if [ "${OSG_WANDB:-0}" = "1" ]; then
+    if "$PY" -c "import wandb" >/dev/null 2>&1; then
+        export WANDB_MODE=offline
+        export WANDB_DIR="$OUT/wandb"
+        mkdir -p "$WANDB_DIR"
+        say "logging to W&B (offline) in $WANDB_DIR"
+        "$PY" -m dgm.project1.wandb_cli sync --run-dir "$OUT" --name "$TAG" \
+            --mode offline --tags osg "${GLIDEIN_ResourceName:-unknown}" \
+            || say "[warn] offline W&B logging failed; the run itself is fine"
+    else
+        say "[warn] OSG_WANDB=1 but wandb is not in this image; skipping"
+    fi
+fi
+
 # ── package outputs ──────────────────────────────────────────────────────────
 cd "$SCRATCH"
 

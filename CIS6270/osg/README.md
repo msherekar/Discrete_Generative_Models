@@ -242,6 +242,51 @@ cp $R/diffusion_results.pt results/long250_20261001/diffusion/results.pt
 `dgm-resample-cfg` and re-decoding at another mutation budget possible later —
 worth keeping, too big to pile up in `/home`.
 
+## Weights & Biases
+
+Logging reads `results.pt` rather than instrumenting the training loop, so no
+experiment code changed and loss curves arrive at **full per-epoch
+resolution** — `run_experiment` prints only four or five epoch lines but stores
+every one. Default destination is `proterial/CIS6270`.
+
+Two routes for OSG. Both end with the run in W&B; pick by whether you want to
+rebuild the image.
+
+### Route A — sync after recovery (no image rebuild)
+
+Works with the image you already built. Recover the run as usual, then:
+
+```bash
+dgm-wandb sync --run-dir results/long250_20261001 --tags osg l40 --group long250
+```
+
+Needs the 386 MB `results.pt` files present, so it costs an OSDF download per
+run. Fine for one run; wasteful across a sweep.
+
+### Route B — offline on the node, sync on the access point
+
+Set `OSG_WANDB=1` in the job environment. The node writes an **offline** W&B
+run into the results directory, the tarball carries it home (about 4 KB), and
+you sync it on the access point — **no `results.pt` download at all**:
+
+```bash
+tar -xzf long250_20261001.tar.gz
+wandb sync results/long250_20261001/wandb/wandb/offline-run-*
+```
+
+Add to the submit file:
+
+```
+environment = "OSG_WANDB=1"
+```
+
+This needs `wandb` in the image. Both `.def` files now install it, so rebuild
+and **bump `IMAGE_VERSION`**. The worker needs no W&B credentials — offline
+mode writes locally and the upload happens from the access point.
+
+If `OSG_WANDB=1` is set on an image without wandb, the job logs a warning and
+carries on; the run itself is unaffected.
+
 ## Scoring
 
 Jobs run with `--no-oracle`: METL needs `pytorch-lightning` plus five more

@@ -8,6 +8,7 @@ Runnable modules (each has a console script and works with `python -m`):
   compare_models      cross-model scaling analysis
   gfp_metrics         avGFP-specific evaluation with a random-variant control
   resample_cfg        re-sample a finished run at new guidance weights
+  wandb_cli           wrap a run, or log a finished one, to Weights & Biases
   run_mnist           the same guidance machinery on images
   prepare_gfp, split_gfp, add_properties, gfp_oracle, oracle_sweep,
   esm_compare, analyze_sweep, compute_fid, plot_guidance_sweep

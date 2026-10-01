@@ -52,3 +52,7 @@ osg/jobs/*_results.pt
 osg/jobs/logs/*
 !osg/jobs/logs/.gitkeep
 osg/env/*.sif
+
+# W&B local run cache. Logging reads results.pt, so nothing here is a source
+# of truth; set WANDB_DIR to move it outside the repo if you prefer.
+wandb/

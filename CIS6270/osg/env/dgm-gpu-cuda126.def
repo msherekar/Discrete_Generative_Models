@@ -33,7 +33,8 @@ From: hub.opensciencegrid.org/htc/rocky:9-cuda-12.6.0
         "numpy>=1.24" \
         "scipy>=1.10" \
         "scikit-learn>=1.7.2" \
-        "matplotlib>=3.8"
+        "matplotlib>=3.8" \
+        "wandb>=0.19"
 
 %environment
     export HF_HUB_OFFLINE=1

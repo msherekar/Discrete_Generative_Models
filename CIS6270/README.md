@@ -269,6 +269,31 @@ python -m dgm.project1.run_experiment --list-models
 Every module listed above has a console script named after it
 (`dgm-evaluate`, `dgm-gfp-metrics`, `dgm-embedding-oracle`, and so on).
 
+### Experiment tracking
+
+Runs log to Weights & Biases at `proterial/CIS6270`. Nothing in the experiment
+code knows about it — `dgm-wandb` reads the `results.pt` that every run already
+writes, which means loss curves come out at full per-epoch resolution and any
+past run can be backfilled.
+
+```bash
+# wrap a run: opens the W&B run first, streams output, logs when it finishes
+dgm-wandb run --name long250_20261001 --tags local gb10 -- \
+    --esm-model esm2_8m --dataset data/avgfp_train_props.csv --epochs 250
+
+# log a run that already exists, including old ones
+dgm-wandb sync --run-dir project1_eval/outputs/esm2_8m_long250
+```
+
+What gets logged: both modalities' per-epoch loss curves; per-arm oracle
+brightness, Hamming distance and uniqueness as both a sortable table and flat
+summary keys; the full 45-key run configuration; host and GPU; and the FASTA
+files and plots as an artifact. `results.pt` itself is not uploaded — it is
+hundreds of megabytes and belongs in OSDF.
+
+Override the destination with `--entity`/`--project` or `WANDB_ENTITY`/
+`WANDB_PROJECT`. For OSG, see [`osg/README.md`](osg/README.md#weights--biases).
+
 ### Where results go
 
 Code no longer sits next to its data, so paths are resolved in

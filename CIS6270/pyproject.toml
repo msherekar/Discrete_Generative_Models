@@ -46,6 +46,7 @@ dgm-compute-fid        = "dgm.project1.compute_fid:main"
 dgm-esm-compare        = "dgm.project1.esm_compare:main"
 dgm-oracle-sweep       = "dgm.project1.oracle_sweep:main"
 dgm-plot-guidance-sweep = "dgm.project1.plot_guidance_sweep:main"
+dgm-wandb              = "dgm.project1.wandb_cli:main"
 
 [build-system]
 requires = ["hatchling"]
