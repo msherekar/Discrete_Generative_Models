@@ -1,0 +1,339 @@
+{
+  "dsb_results": {
+    "paper": "dsb",
+    "page": 10,
+    "crop": [
+      107,
+      120,
+      505,
+      216
+    ],
+    "type": "original paper crop"
+  },
+  "dsbm_results": {
+    "paper": "dsbm",
+    "page": 9,
+    "crop": [
+      108,
+      70,
+      505,
+      150
+    ],
+    "type": "original paper crop"
+  },
+  "ddsbm_results": {
+    "paper": "ddsbm",
+    "page": 9,
+    "crop": [
+      105,
+      147,
+      507,
+      215
+    ],
+    "type": "original paper crop"
+  },
+  "csbm_images": {
+    "paper": "csbm",
+    "page": 9,
+    "crop": [
+      53,
+      63,
+      546,
+      379
+    ],
+    "type": "original paper crop"
+  },
+  "csbm_table": {
+    "paper": "csbm",
+    "page": 9,
+    "crop": [
+      306,
+      530,
+      545,
+      598
+    ],
+    "type": "original paper crop"
+  },
+  "sf2m_table3": {
+    "paper": "sf2m",
+    "page": 8,
+    "crop": [
+      62,
+      123,
+      298,
+      171
+    ],
+    "type": "original paper crop"
+  },
+  "sf2m_table4": {
+    "paper": "sf2m",
+    "page": 8,
+    "crop": [
+      62,
+      248,
+      298,
+      358
+    ],
+    "type": "original paper crop"
+  },
+  "sf2m_table5": {
+    "paper": "sf2m",
+    "page": 8,
+    "crop": [
+      315,
+      123,
+      548,
+      179
+    ],
+    "type": "original paper crop"
+  },
+  "tr2d2_framework": {
+    "paper": "tr2d2",
+    "page": 3,
+    "crop": [
+      107,
+      82,
+      507,
+      253
+    ],
+    "type": "original paper crop"
+  },
+  "tr2d2_results": {
+    "paper": "tr2d2",
+    "page": 8,
+    "crop": [
+      108,
+      122,
+      505,
+      243
+    ],
+    "type": "original paper crop"
+  },
+  "branch_framework": {
+    "paper": "branch",
+    "page": 3,
+    "crop": [
+      108,
+      84,
+      505,
+      231
+    ],
+    "type": "original paper crop"
+  },
+  "branch_lidar": {
+    "paper": "branch",
+    "page": 7,
+    "crop": [
+      107,
+      246,
+      506,
+      329
+    ],
+    "type": "original paper crop"
+  },
+  "branch_table1": {
+    "paper": "branch",
+    "page": 7,
+    "crop": [
+      368,
+      206,
+      508,
+      239
+    ],
+    "type": "original paper crop"
+  },
+  "branch_table3": {
+    "paper": "branch",
+    "page": 8,
+    "crop": [
+      250,
+      563,
+      508,
+      622
+    ],
+    "type": "original paper crop"
+  },
+  "branch_mixed_results": {
+    "paper": "branch",
+    "page": 8,
+    "crop": [
+      107,
+      328,
+      506,
+      383
+    ],
+    "type": "original paper crop"
+  },
+  "entangled_framework": {
+    "paper": "entangled",
+    "page": 3,
+    "crop": [
+      105,
+      62,
+      507,
+      225
+    ],
+    "type": "original paper crop"
+  },
+  "entangled_results": {
+    "paper": "entangled",
+    "page": 9,
+    "crop": [
+      108,
+      168,
+      505,
+      282
+    ],
+    "type": "original paper crop"
+  },
+  "entangled_tradeoffs": {
+    "paper": "entangled",
+    "page": 10,
+    "crop": [
+      108,
+      315,
+      505,
+      481
+    ],
+    "type": "original paper crop"
+  },
+  "sf2m_results": {
+    "paper": "sf2m",
+    "page": 8,
+    "crop": [
+      62,
+      123,
+      298,
+      171
+    ],
+    "type": "original paper crop"
+  },
+  "csbm_results": {
+    "components": [
+      "csbm_images",
+      "Original Figure 4",
+      "csbm_table",
+      "Original Table 2"
+    ],
+    "type": "original regions arranged side by side"
+  },
+  "branch_results": {
+    "components": [
+      "branch_lidar",
+      "Original Figure 3",
+      "branch_table3",
+      "Original Table 3"
+    ],
+    "type": "original regions arranged side by side"
+  },
+  "sinkhorn_title": {
+    "paper": "sinkhorn",
+    "page": 1,
+    "crop": [
+      125,
+      145,
+      485,
+      212
+    ],
+    "type": "original paper header"
+  },
+  "foundations_title": {
+    "paper": "foundations",
+    "page": 1,
+    "crop": [
+      55,
+      91,
+      557.0,
+      192
+    ],
+    "type": "original paper header"
+  },
+  "dsb_title": {
+    "paper": "dsb",
+    "page": 1,
+    "crop": [
+      105,
+      94.8338394165039,
+      507,
+      284.55413818359375
+    ],
+    "type": "original paper header"
+  },
+  "dsbm_title": {
+    "paper": "dsbm",
+    "page": 1,
+    "crop": [
+      105,
+      94.8338394165039,
+      507,
+      206.55914306640625
+    ],
+    "type": "original paper header"
+  },
+  "sf2m_title": {
+    "paper": "sf2m",
+    "page": 1,
+    "crop": [
+      55,
+      87.68718719482422,
+      557.0,
+      322.50830078125
+    ],
+    "type": "original paper header"
+  },
+  "ddsbm_title": {
+    "paper": "ddsbm",
+    "page": 1,
+    "crop": [
+      105,
+      74.53105926513672,
+      507,
+      214.30726623535156
+    ],
+    "type": "original paper header"
+  },
+  "csbm_title": {
+    "paper": "csbm",
+    "page": 1,
+    "crop": [
+      55,
+      84.739990234375,
+      557.0,
+      168.0601806640625
+    ],
+    "type": "original paper header"
+  },
+  "tr2d2_title": {
+    "paper": "tr2d2",
+    "page": 1,
+    "crop": [
+      105,
+      75.52323913574219,
+      507,
+      247.40626525878906
+    ],
+    "type": "original paper header"
+  },
+  "branch_title": {
+    "paper": "branch",
+    "page": 1,
+    "crop": [
+      105,
+      75.39202117919922,
+      507,
+      216.5222930908203
+    ],
+    "type": "original paper header"
+  },
+  "entangled_title": {
+    "paper": "entangled",
+    "page": 1,
+    "crop": [
+      105,
+      75.39202117919922,
+      507,
+      216.5222930908203
+    ],
+    "type": "original paper header"
+  }
+}

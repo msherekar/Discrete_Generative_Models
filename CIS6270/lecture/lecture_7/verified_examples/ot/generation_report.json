@@ -1,0 +1,9 @@
+{
+  "method": "ot",
+  "sampling_seed": 6370,
+  "samples": 128,
+  "coupling": "plan",
+  "exact_expected_cost": 3.3999999999999995,
+  "sampled_average_cost": 3.6875,
+  "finite_values": true
+}

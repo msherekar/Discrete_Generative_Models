@@ -1,0 +1,16 @@
+{
+  "terminal_weights": [
+    -0.0003769397735595703,
+    0.5967718958854675,
+    0.396018922328949
+  ],
+  "target_weights": [
+    0.0,
+    0.6000000238418579,
+    0.4000000059604645
+  ],
+  "velocity_fit_mse": 0.028642769902944565,
+  "max_mass_error": 0.00758439302444458,
+  "minimum_weight": -0.00014674663543701172,
+  "approximation": "Small MLP interpolants, fixed synthetic endpoint coupling, linear growth, sampled soft mass constraints."
+}

@@ -1,0 +1,90 @@
+{
+  "quick": false,
+  "methods": [
+    {
+      "method": "ot",
+      "checkpoint_reload_equal": true,
+      "finite_values": true
+    },
+    {
+      "method": "sinkhorn",
+      "checkpoint_reload_equal": true,
+      "finite_values": true
+    },
+    {
+      "method": "finite-sb",
+      "checkpoint_reload_equal": true,
+      "finite_values": true
+    },
+    {
+      "method": "discrete-imf",
+      "checkpoint_reload_equal": true,
+      "finite_values": true
+    },
+    {
+      "method": "ctmc-sb",
+      "checkpoint_reload_equal": true,
+      "finite_values": true
+    },
+    {
+      "method": "gaussian-sb",
+      "checkpoint_reload_equal": true,
+      "finite_values": true
+    },
+    {
+      "method": "reward-tilt",
+      "checkpoint_reload_equal": true,
+      "finite_values": true
+    },
+    {
+      "method": "branch-mass",
+      "checkpoint_reload_equal": true,
+      "finite_values": true
+    },
+    {
+      "method": "cone-geometry",
+      "checkpoint_reload_equal": true,
+      "finite_values": true
+    },
+    {
+      "method": "dsb",
+      "checkpoint_reload_equal": true,
+      "finite_values": true
+    },
+    {
+      "method": "dsbm",
+      "checkpoint_reload_equal": true,
+      "finite_values": true
+    },
+    {
+      "method": "sf2m",
+      "checkpoint_reload_equal": true,
+      "finite_values": true
+    },
+    {
+      "method": "tr2d2",
+      "checkpoint_reload_equal": true,
+      "finite_values": true
+    },
+    {
+      "method": "branch",
+      "checkpoint_reload_equal": true,
+      "finite_values": true
+    },
+    {
+      "method": "entangled",
+      "checkpoint_reload_equal": true,
+      "finite_values": true
+    },
+    {
+      "method": "ddsbm",
+      "checkpoint_reload_equal": true,
+      "finite_values": true
+    },
+    {
+      "method": "csbm",
+      "checkpoint_reload_equal": true,
+      "finite_values": true
+    }
+  ]
+}

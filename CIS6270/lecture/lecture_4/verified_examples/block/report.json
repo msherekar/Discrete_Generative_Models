@@ -1,0 +1,13 @@
+{
+  "metrics": {
+    "valid_dna": true,
+    "unique_fraction": 0.75,
+    "mean_gc": 0.59375,
+    "mean_atat_match": 0.25
+  },
+  "method": "block",
+  "data": "synthetic DNA; not biological validation",
+  "train_loss_first_20_mean": 5.375486207008362,
+  "train_loss_last_20_mean": 3.2929233014583588,
+  "validation_loss_one_mc_draw": 2.7980802059173584
+}

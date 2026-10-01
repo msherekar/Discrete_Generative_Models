@@ -1,0 +1,23 @@
+{
+  "method": "consistency",
+  "data_kind": "four-gaussian-mixture",
+  "train_loss_first_20_mean": 1.9746342718601226,
+  "train_loss_last_20_mean": 1.979964154958725,
+  "training_steps": 1000,
+  "python": "3.12.14",
+  "torch": "2.9.1+cpu",
+  "sample_steps": 8,
+  "samples": 128,
+  "sampling_seed": 6370,
+  "finite_samples": true,
+  "mean_distance_to_center": 0.7534297704696655,
+  "mode_fractions": [
+    0.265625,
+    0.25,
+    0.2421875,
+    0.2421875
+  ],
+  "mode_entropy": 1.3855692148208618,
+  "mean_target_log_density": -7.795166492462158,
+  "elapsed_seconds": 3.6416576160045224
+}

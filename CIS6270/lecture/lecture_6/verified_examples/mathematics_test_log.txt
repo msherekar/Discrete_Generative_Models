@@ -1,0 +1,31 @@
+test_analytic_mixture_velocity (test_mathematics.MathematicsTests.test_analytic_mixture_velocity) ... ok
+test_categorical_numerical_step (test_mathematics.MathematicsTests.test_categorical_numerical_step) ... ok
+test_chen_arithmetic_and_covariance (test_mathematics.MathematicsTests.test_chen_arithmetic_and_covariance) ... ok
+test_chen_tree_matches_increment_sum (test_mathematics.MathematicsTests.test_chen_tree_matches_increment_sum) ... ok
+test_composition_alone_does_not_identify_motion (test_mathematics.MathematicsTests.test_composition_alone_does_not_identify_motion) ... /workspace/scratch/e1464e1e4960/cis6270-code/lecture_6/tests/test_mathematics.py:65: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at /pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:836.)
+  self.assertEqual(float(semigroup_loss(m,m,x,s,t)),0.)
+ok
+test_count_divergence_minimizes_conditional_mean (test_mathematics.MathematicsTests.test_count_divergence_minimizes_conditional_mean) ... ok
+test_decoding_clock_inverse (test_mathematics.MathematicsTests.test_decoding_clock_inverse) ... ok
+test_detached_kl_gradient (test_mathematics.MathematicsTests.test_detached_kl_gradient) ... ok
+test_discrete_teachers_with_zero_derivative (test_mathematics.MathematicsTests.test_discrete_teachers_with_zero_derivative) ... ok
+test_endpoint_match_does_not_remove_temporal_residual (test_mathematics.MathematicsTests.test_endpoint_match_does_not_remove_temporal_residual) ... ok
+test_exact_identity_and_semigroup (test_mathematics.MathematicsTests.test_exact_identity_and_semigroup) ... ok
+test_gap_labels_and_global_budget (test_mathematics.MathematicsTests.test_gap_labels_and_global_budget) ... ok
+test_glass_matches_two_observation_bayes_rule (test_mathematics.MathematicsTests.test_glass_matches_two_observation_bayes_rule) ... ok
+test_glass_no_inner_observation (test_mathematics.MathematicsTests.test_glass_no_inner_observation) ... ok
+test_importance_weights_recover_posterior_mean (test_mathematics.MathematicsTests.test_importance_weights_recover_posterior_mean) ... ok
+test_insertion_interval_zero_and_terminal (test_mathematics.MathematicsTests.test_insertion_interval_zero_and_terminal) ... ok
+test_insertion_preserves_order_and_clocks (test_mathematics.MathematicsTests.test_insertion_preserves_order_and_clocks) ... ok
+test_jvp_losses_reach_parameters (test_mathematics.MathematicsTests.test_jvp_losses_reach_parameters) ... ok
+test_lagrangian_and_eulerian_jvp (test_mathematics.MathematicsTests.test_lagrangian_and_eulerian_jvp) ... ok
+test_meanflow_backward_identity (test_mathematics.MathematicsTests.test_meanflow_backward_identity) ... ok
+test_meta_surrogate_gradient (test_mathematics.MathematicsTests.test_meta_surrogate_gradient) ... ok
+test_same_noise_constant_sde_and_wrong_noise_counterexample (test_mathematics.MathematicsTests.test_same_noise_constant_sde_and_wrong_noise_counterexample) ... ok
+test_weighted_probability_composition_matches_maps (test_mathematics.MathematicsTests.test_weighted_probability_composition_matches_maps) ... ok
+
+----------------------------------------------------------------------
+Ran 23 tests in 0.844s
+
+OK

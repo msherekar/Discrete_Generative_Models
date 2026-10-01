@@ -1,0 +1,13 @@
+{
+  "method": "ddsbm",
+  "sampling_seed": 113,
+  "samples": 128,
+  "terminal_frequencies": [
+    19,
+    109
+  ],
+  "terminal_probability_one": 0.8515625,
+  "target_probability_one": 0.8,
+  "approximation": "Exact two-state transitions for rates frozen at each grid midpoint; finite-time approximation to the learned inhomogeneous CTMC.",
+  "finite_values": true
+}

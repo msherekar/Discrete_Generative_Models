@@ -1,0 +1,28 @@
+{
+  "method": "branch",
+  "sampling_seed": 111,
+  "samples": 128,
+  "terminal_branch_weights": [
+    -0.0003769397735595703,
+    0.5967718958854675,
+    0.396018922328949
+  ],
+  "total_mass": 0.9924138784408569,
+  "minimum_weight": -0.0003769397735595703,
+  "branch_means": [
+    [
+      0.9262207746505737,
+      0.011590571142733097
+    ],
+    [
+      0.9548583030700684,
+      0.9947662353515625
+    ],
+    [
+      0.945267379283905,
+      -0.9763807654380798
+    ]
+  ],
+  "approximation": "Learned velocity integration; soft growth constraints. Raw branch weights are retained, including negative residuals.",
+  "finite_values": true
+}

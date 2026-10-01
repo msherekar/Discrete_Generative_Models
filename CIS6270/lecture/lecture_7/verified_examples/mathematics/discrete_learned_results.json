@@ -1,0 +1,60 @@
+{
+  "ddsbm": {
+    "predicted_off_diagonal_rates": [
+      1.9151279926300049,
+      1.058557391166687,
+      2.1939687728881836,
+      0.988294243812561,
+      2.526475191116333,
+      0.8801078796386719,
+      2.907924175262451,
+      0.7427551746368408,
+      3.323577404022217,
+      0.5934789180755615
+    ],
+    "exact_off_diagonal_rates": [
+      2.06382711825032,
+      0.96907341817253,
+      2.1384113511810017,
+      0.9352737483812177,
+      2.3089380022891426,
+      0.8661990915378182,
+      2.7390309470822976,
+      0.7301852511489376,
+      4.158464179641882,
+      0.4809467903537973
+    ],
+    "relative_mse": 0.012589408987513045,
+    "approximation": "Neural Markov rate projection for a known finite-state SB coupling; outer IMF is separately enumerated exactly."
+  },
+  "csbm": {
+    "transitions": [
+      [
+        [
+          0.6399999856948853,
+          0.35999995470046997
+        ],
+        [
+          0.1600000411272049,
+          0.8400000333786011
+        ]
+      ],
+      [
+        [
+          0.40000003576278687,
+          0.5999999642372131
+        ],
+        [
+          0.06666672229766846,
+          0.9333332777023315
+        ]
+      ]
+    ],
+    "maximum_transition_error": 5.5630958395447294e-08,
+    "terminal": [
+      0.2000000526507697,
+      0.7999999547998109
+    ],
+    "approximation": "Exact path-weighted categorical cross-entropy with a fully expressive transition table; no sampling error in this fit."
+  }
+}

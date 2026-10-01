@@ -1,0 +1,55 @@
+{
+  "history": [
+    {
+      "iteration": 1,
+      "terminal_mean": 1.7022067941215333,
+      "terminal_variance": 1.0682488882113665,
+      "endpoint_covariance": 0.4347806612349391
+    },
+    {
+      "iteration": 2,
+      "terminal_mean": 1.9262309487320433,
+      "terminal_variance": 1.0015204455351157,
+      "endpoint_covariance": 0.41456217254202665
+    },
+    {
+      "iteration": 3,
+      "terminal_mean": 1.9605644581500354,
+      "terminal_variance": 1.0109902841164211,
+      "endpoint_covariance": 0.4141692571417277
+    },
+    {
+      "iteration": 4,
+      "terminal_mean": 1.984687413780087,
+      "terminal_variance": 1.0275442805193753,
+      "endpoint_covariance": 0.4094137029703032
+    },
+    {
+      "iteration": 5,
+      "terminal_mean": 1.979690077516022,
+      "terminal_variance": 0.9873198310164486,
+      "endpoint_covariance": 0.3925607945620354
+    },
+    {
+      "iteration": 6,
+      "terminal_mean": 1.9794744802815345,
+      "terminal_variance": 1.0143200058173722,
+      "endpoint_covariance": 0.4190984218363109
+    },
+    {
+      "iteration": 7,
+      "terminal_mean": 1.9814203859404378,
+      "terminal_variance": 1.0097128798635402,
+      "endpoint_covariance": 0.4078044405651924
+    },
+    {
+      "iteration": 8,
+      "terminal_mean": 1.9802854402766243,
+      "terminal_variance": 0.9881133286853722,
+      "endpoint_covariance": 0.4122126805970996
+    }
+  ],
+  "reference_epsilon": 2.0,
+  "analytic_endpoint_covariance": 0.41421356237309515,
+  "approximation": "Affine regression and finite-step Gaussian reverse kernels; both endpoint resets are executed."
+}

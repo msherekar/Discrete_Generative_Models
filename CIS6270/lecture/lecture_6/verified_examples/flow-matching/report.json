@@ -1,0 +1,23 @@
+{
+  "method": "flow-matching",
+  "data_kind": "four-gaussian-mixture",
+  "train_loss_first_20_mean": 3.24046847820282,
+  "train_loss_last_20_mean": 2.0242882668972015,
+  "training_steps": 1000,
+  "python": "3.12.14",
+  "torch": "2.9.1+cpu",
+  "sample_steps": 8,
+  "samples": 128,
+  "sampling_seed": 6370,
+  "finite_samples": true,
+  "mean_distance_to_center": 0.5745956301689148,
+  "mode_fractions": [
+    0.2421875,
+    0.2265625,
+    0.28125,
+    0.25
+  ],
+  "mode_entropy": 1.383159875869751,
+  "mean_target_log_density": -5.167024612426758,
+  "elapsed_seconds": 2.210745528995176
+}

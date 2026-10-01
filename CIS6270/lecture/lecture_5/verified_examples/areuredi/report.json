@@ -1,0 +1,19 @@
+{
+  "metrics": {
+    "valid_dna": true,
+    "unique_fraction": 0.875,
+    "mean_gc": 0.4375,
+    "mean_atat_match": 0.21875
+  },
+  "method": "areuredi",
+  "data": "synthetic DNA; not biological validation",
+  "teacher_loss_last_20_mean": 2.72806202173233,
+  "paired_examples": 128,
+  "redi_scope": "one teacher-recoupling round; no guaranteed TC reduction",
+  "train_loss_first_20_mean": 3.9589606523513794,
+  "train_loss_last_20_mean": 2.1978128612041474,
+  "accepted_edits": 181,
+  "eta_final": 8.0,
+  "reference": "smoothed position-wise empirical DNA frequencies",
+  "scope": "finite annealing demonstration, not an equilibrium certificate"
+}
