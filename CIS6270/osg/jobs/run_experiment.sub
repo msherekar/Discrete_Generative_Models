@@ -8,7 +8,7 @@
 # Stage inputs once first with ../bin/stage.sh. Full runbook: ../README.md
 
 # ── identity: the two values that are yours ──────────────────────────────────
-OSG_USER = CHANGEME
+OSG_USER = mukul.sherekar
 OSG_AP   = ap40
 OSDF     = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)
 
@@ -39,7 +39,7 @@ RUN_ARGS = --esm-model esm2_8m \
            --normalize-guidance --endpoint-guidance \
            --cfg-weight 0 1 2 4 \
            --reward-eta 30 100 \
-           --batch-size 128 --epochs 250 --samples 100 \
+           --batch-size 128 --epochs 500 --samples 100 \
            --diffusion-steps 200
 
 # ── container ────────────────────────────────────────────────────────────────
