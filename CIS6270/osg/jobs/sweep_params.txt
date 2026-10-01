@@ -1,0 +1,12 @@
+# tag, seed, eta
+#
+# tag must be unique across every line and across past submissions: it names
+# the results.pt in OSDF, and OSDF caches by name, so a reused tag can serve a
+# stale file. Date-stamp or version the prefix when repeating a sweep.
+#
+# These four arms cross two seeds with two reward strengths. The fixed flags
+# are in BASE_ARGS inside sweep.sub.
+e30_s11,  11,  30
+e30_s12,  12,  30
+e100_s11, 11,  100
+e100_s12, 12,  100

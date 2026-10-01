@@ -1,0 +1,91 @@
+# One Project 1 experiment on an OSPool GPU node.
+#
+#   condor_submit run_experiment.sub
+#
+# Edit TAG and RUN_ARGS below, or override at submit time:
+#   condor_submit run_experiment.sub -append 'TAG = k5_t07'
+#
+# Stage inputs once first with ../bin/stage.sh. Full runbook: ../README.md
+
+# ── identity: the two values that are yours ──────────────────────────────────
+OSG_USER = CHANGEME
+OSG_AP   = ap40
+OSDF     = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)
+
+# Bump on every image rebuild: OSDF caches aggressively by file name.
+IMAGE_VERSION = v1
+
+# ── the run ──────────────────────────────────────────────────────────────────
+# TAG names the output files, so keep it unique per run for the same reason.
+TAG = long250
+
+# The flags, verbatim as they would be typed locally. Condor's quoted arguments
+# form splits on spaces only, so comma-bearing values like 63,64,65 and
+# multi-value flags like --cfg-weight 0 1 2 4 pass through untouched.
+# --outdir and --no-oracle are added by run_experiment.sh; do not set them here.
+RUN_ARGS = --esm-model esm2_8m \
+           --dataset data/avgfp_train_props.csv \
+           --dataset-tag $(TAG) \
+           --max-length 237 \
+           --mut-budget 5 --exact-mutations \
+           --reference data/avgfp_wt.txt \
+           --restrict-support data/avgfp_oracle_v2.npz \
+           --decode-temperature 0.7 \
+           --freeze-positions 63,64,65 \
+           --minimize 2 \
+           --constraint-property 3 --constraint-rho 1.0 \
+           --setpoint 50 99 --setpoint-percentile --setpoint-saturation 6 \
+           --arch transformer --hidden 256 \
+           --normalize-guidance --endpoint-guidance \
+           --cfg-weight 0 1 2 4 \
+           --reward-eta 30 100 \
+           --batch-size 128 --epochs 250 --samples 100 \
+           --diffusion-steps 200
+
+# ── container ────────────────────────────────────────────────────────────────
+# container_image takes no quotes, and the .sif must NOT appear under
+# transfer_input_files -- Condor stages it for you.
+universe        = container
+container_image = $(OSDF)/dgm-gpu-$(IMAGE_VERSION).sif
+
+executable = run_experiment.sh
+arguments  = "$(TAG) $(RUN_ARGS)"
+
+# ── input ────────────────────────────────────────────────────────────────────
+# All three sit well under the 1 GB mark above which OSG asks for OSDF:
+# code ~1 MB, this run's data ~13 MB, esm2_8m weights ~30 MB.
+# For esm2_650m (2.5 GB) or bigger, drop esm-cache.tar.gz and use instead:
+#   transfer_input_files = dgm-src.tar.gz, inputs.tar.gz, $(OSDF)/esm-cache/?recursive
+transfer_input_files = dgm-src.tar.gz, inputs.tar.gz, esm-cache.tar.gz
+
+# ── output ───────────────────────────────────────────────────────────────────
+# The small tarball comes home; the two results.pt files (200-400 MB each) are
+# remapped into OSDF so they never land on the access point.
+should_transfer_files   = YES
+when_to_transfer_output = ON_EXIT
+transfer_output_files   = $(TAG).tar.gz, $(TAG)_flow_results.pt, $(TAG)_diffusion_results.pt
+transfer_output_remaps  = "$(TAG)_flow_results.pt = $(OSDF)/runs/$(TAG)_flow_results.pt; $(TAG)_diffusion_results.pt = $(OSDF)/runs/$(TAG)_diffusion_results.pt"
+
+# ── resources ────────────────────────────────────────────────────────────────
+request_gpus   = 1
+request_cpus   = 2
+request_memory = 16GB
+request_disk   = 20GB
+
+# The image's cu118 wheels cover sm_70 to sm_90: V100, A100, A40, L40S.
+# Ruling out older cards avoids matching a node that cannot run them at all.
+require_gpus        = (Capability >= 7.0)
+gpus_minimum_memory = 16G
+
+# A 250-epoch run finishes inside 10 hours. If a job is ever held for running
+# long, raise this to "Long" (<= 20 h) and expect fewer eligible nodes.
++JobDurationCategory = "Medium"
+
+# ── logging and retries ──────────────────────────────────────────────────────
+output = logs/$(TAG).$(ClusterId).$(ProcId).out
+error  = logs/$(TAG).$(ClusterId).$(ProcId).err
+log    = logs/$(TAG).$(ClusterId).log
+
+max_retries = 3
+
+queue 1

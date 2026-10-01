@@ -1,0 +1,56 @@
+# Apptainer image for Project 1 on the OSPool.
+#
+# Built on OSG's own PyTorch base, so torch and CUDA are the versions OSG
+# maintains against its GPU fleet rather than the cu130 build pinned in
+# ../pyproject.toml for this laptop's GB10 (sm_121). Those cu130 wheels need
+# driver >= 580, which most OSPool nodes do not have; this base needs only the
+# 11.8 runtime and matches V100 / A100 / A40 / L40S nodes.
+#
+# dgm itself is NOT installed here. The job script puts the transferred source
+# on PYTHONPATH, so editing code needs no image rebuild -- only a dependency
+# change does.
+#
+# Build on the access point (the TMPDIR exports and --ignore-proot are OSPool
+# policy, not optional):
+#
+#   mkdir -p $HOME/tmp
+#   export TMPDIR=$HOME/tmp APPTAINER_TMPDIR=$HOME/tmp APPTAINER_CACHEDIR=$HOME/tmp
+#   apptainer build --ignore-proot dgm-gpu-v1.sif dgm-gpu.def
+#
+# Then stage it (OSDF caches by name, so bump v1 -> v2 on every rebuild):
+#
+#   cp dgm-gpu-v1.sif /ospool/$AP/data/$USER/
+#
+Bootstrap: docker
+From: hub.opensciencegrid.org/htc/pytorch:2.3.1-cuda11.8
+
+%post
+    set -eu
+    python -m pip install --no-cache-dir --upgrade pip
+    # Only what the base lacks. torch/torchvision come from the base image and
+    # are deliberately not reinstalled.
+    python -m pip install --no-cache-dir \
+        "transformers==4.57.6" \
+        "numpy>=1.24" \
+        "scipy>=1.10" \
+        "scikit-learn>=1.7.2" \
+        "matplotlib>=3.8"
+
+%environment
+    # Weights are pre-staged by the job; never reach for the network mid-run.
+    export HF_HUB_OFFLINE=1
+    export TRANSFORMERS_OFFLINE=1
+    export TOKENIZERS_PARALLELISM=false
+    export MPLBACKEND=Agg
+
+%test
+    # Fails the build rather than every job if a pin is incompatible.
+    python - <<'PY'
+import matplotlib, numpy, scipy, sklearn, torch, transformers
+print("torch       ", torch.__version__)
+print("transformers", transformers.__version__)
+print("numpy       ", numpy.__version__)
+print("scipy       ", scipy.__version__)
+print("sklearn     ", sklearn.__version__)
+print("matplotlib  ", matplotlib.__version__)
+PY

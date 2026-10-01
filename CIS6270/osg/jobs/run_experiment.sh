@@ -1,0 +1,157 @@
+#!/bin/bash
+#
+# Runs one Project 1 experiment on an OSPool worker node.
+#
+#   run_experiment.sh <tag> [run_experiment flags ...]
+#
+# Everything arrives as tarballs in the Condor scratch directory. This script
+# rebuilds the directory layout dgm.common.paths expects, points the package at
+# it with DGM_ROOT, and runs the experiment with the flags it was handed -- so
+# the flags are character-for-character the ones used locally.
+#
+# Contract with run_experiment.sub. On success this leaves, at scratch root:
+#
+#   <tag>.tar.gz                   FASTA, run config, plots, this log  -> access point
+#   <tag>_flow_results.pt          latents + weights                   -> OSDF
+#   <tag>_diffusion_results.pt     latents + weights                   -> OSDF
+#
+# results.pt is 200-400 MB per modality, which is why it is split out and
+# remapped to OSDF rather than returned to the access point.
+#
+set -euo pipefail
+
+if [ "$#" -lt 1 ]; then
+    echo "usage: $0 <tag> [run_experiment flags ...]" >&2
+    exit 2
+fi
+TAG="$1"; shift
+
+SCRATCH="${_CONDOR_SCRATCH_DIR:-$PWD}"
+cd "$SCRATCH"
+
+say() { echo "[$(date -u +%H:%M:%S)] $*"; }
+
+# ── what we landed on ────────────────────────────────────────────────────────
+say "host $(hostname)"
+say "scratch $SCRATCH"
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader || true
+else
+    echo "  [warn] no nvidia-smi; this node may have no GPU" >&2
+fi
+
+# ── unpack ───────────────────────────────────────────────────────────────────
+# dgm-src.tar.gz contains CIS6270/{pyproject.toml,src/dgm/...}: both are needed
+# because paths.py identifies the course root by finding them together.
+for archive in dgm-src.tar.gz inputs.tar.gz; do
+    [ -f "$archive" ] || { echo "missing input: $archive" >&2; exit 1; }
+    say "unpacking $archive"
+    tar -xzf "$archive"
+done
+
+# The weight cache is optional here: a large model is staged from OSDF as a
+# directory instead, and ESM2_CACHE is pointed straight at it.
+if [ -f esm-cache.tar.gz ]; then
+    say "unpacking esm-cache.tar.gz"
+    tar -xzf esm-cache.tar.gz
+fi
+
+export DGM_ROOT="$SCRATCH/CIS6270"
+[ -f "$DGM_ROOT/pyproject.toml" ] && [ -d "$DGM_ROOT/src/dgm" ] || {
+    echo "dgm-src.tar.gz did not unpack to CIS6270/{pyproject.toml,src/dgm}" >&2
+    echo "contents:" >&2; ls -la "$SCRATCH" >&2
+    exit 1
+}
+
+# No pip install: the source is on PYTHONPATH, so a code change needs no image
+# rebuild and the job does no network I/O to start.
+export PYTHONPATH="$DGM_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+
+# project1_eval holds only gitignored artifacts, so a fresh clone has none of
+# it. Create the tree paths.py will reach for.
+mkdir -p "$DGM_ROOT/project1_eval"/{data,outputs,plots,cache,logs}
+
+# Staged inputs become the data/ directory the flags refer to relatively.
+if [ -d inputs ] && [ -n "$(ls -A inputs 2>/dev/null)" ]; then
+    cp -v inputs/* "$DGM_ROOT/project1_eval/data/"
+fi
+
+# Weights: prefer an unpacked tarball, else an OSDF-staged directory.
+if [ -d esm-cache ]; then
+    export ESM2_CACHE="$SCRATCH/esm-cache"
+elif [ -d cache ]; then
+    export ESM2_CACHE="$SCRATCH/cache"
+else
+    export ESM2_CACHE="$DGM_ROOT/project1_eval/cache"
+    echo "  [warn] no staged ESM weights; the run will try to download them" >&2
+fi
+say "ESM2_CACHE $ESM2_CACHE"
+ls "$ESM2_CACHE" 2>/dev/null | sed 's/^/    /' || true
+
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
+export TOKENIZERS_PARALLELISM=false
+export MPLBACKEND=Agg
+
+PY="${PYTHON:-python3}"
+command -v "$PY" >/dev/null 2>&1 || PY=python
+say "interpreter $("$PY" -c 'import sys; print(sys.executable, sys.version.split()[0])')"
+"$PY" - <<'PY'
+import torch
+print(f"    torch {torch.__version__}  cuda_available={torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"    device {torch.cuda.get_device_name(0)}  capability {torch.cuda.get_device_capability(0)}")
+PY
+
+# ── run ──────────────────────────────────────────────────────────────────────
+OUT="$SCRATCH/results/$TAG"
+mkdir -p "$OUT"
+
+# cd into the artifact directory so relative --dataset data/... flags resolve
+# exactly as they do locally.
+cd "$DGM_ROOT/project1_eval"
+
+# METL is not staged, so scoring is off by default and done afterwards with
+# dgm-gfp-metrics. Set OSG_WITH_ORACLE=1 only once METL is in the image.
+ORACLE_FLAG=(--no-oracle)
+if [ "${OSG_WITH_ORACLE:-0}" = "1" ]; then
+    ORACLE_FLAG=()
+fi
+
+say "running: $* --outdir $OUT ${ORACLE_FLAG[*]:-}"
+"$PY" -u -m dgm.project1.run_experiment "$@" \
+    --outdir "$OUT" "${ORACLE_FLAG[@]:-}"
+say "run finished"
+
+# ── package outputs ──────────────────────────────────────────────────────────
+cd "$SCRATCH"
+
+# results.pt out to its own uniquely named file per modality: OSDF caches by
+# name, so the tag must make it unique.
+# Both names are always created, even if empty: run_experiment.sub declares
+# them under transfer_output_files, and Condor fails the whole transfer --
+# losing the tarball too -- if a declared file is absent. A zero-byte
+# results.pt therefore means that modality did not finish; check the .err log.
+for method in flow diffusion; do
+    target="${TAG}_${method}_results.pt"
+    if [ -f "results/$TAG/$method/results.pt" ]; then
+        mv "results/$TAG/$method/results.pt" "$target"
+        say "staged $target ($(du -h "$target" | cut -f1))"
+    else
+        : > "$target"
+        say "[warn] no results.pt for $method; staging an empty placeholder"
+    fi
+done
+
+# Everything small, including any --plot figures, which land under
+# project1_eval/plots rather than --outdir.
+PLOTS_REL=""
+if [ -d "$DGM_ROOT/project1_eval/plots" ] && \
+   [ -n "$(ls -A "$DGM_ROOT/project1_eval/plots" 2>/dev/null)" ]; then
+    cp -r "$DGM_ROOT/project1_eval/plots" "results/$TAG/plots"
+    PLOTS_REL="(with plots)"
+fi
+tar -czf "${TAG}.tar.gz" -C "$SCRATCH" "results/$TAG"
+say "staged ${TAG}.tar.gz $PLOTS_REL ($(du -h "${TAG}.tar.gz" | cut -f1))"
+
+say "done"

@@ -44,3 +44,11 @@ IDEA.md
 
 # FODLERS
 scripts/
+
+# OSG staging artifacts: rebuilt by osg/bin/stage.sh, and the built image is
+# multi-GB and belongs in OSDF rather than the repository.
+osg/jobs/*.tar.gz
+osg/jobs/*_results.pt
+osg/jobs/logs/*
+!osg/jobs/logs/.gitkeep
+osg/env/*.sif

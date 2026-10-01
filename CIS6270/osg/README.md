@@ -1,0 +1,242 @@
+# Running Project 1 on the OSPool
+
+Submitting GPU jobs to OSG via HTCondor. Nothing here changes the existing
+code: `src/dgm` is transferred and put on `PYTHONPATH`, and the two hooks it
+already honours — `DGM_ROOT` and `ESM2_CACHE` — are what point it at the data
+on the worker node.
+
+```
+osg/
+  env/
+    dgm-gpu.def            Apptainer image on OSG's PyTorch base (default)
+    dgm-gpu-cuda126.def    fallback: OSG Rocky 9 + CUDA 12.6, torch pinned here
+  bin/
+    stage.sh               build the three input tarballs
+    fetch_esm_weights.py   populate a weight cache for staging
+  jobs/
+    run_experiment.sub     one run
+    sweep.sub              one job per line of sweep_params.txt
+    sweep_params.txt       tag, seed, eta per line
+    run_experiment.sh      what actually runs on the node
+    logs/                  Condor out/err/log land here
+```
+
+## Why not just use the local pins
+
+`pyproject.toml` pins `torch==2.9.1+cu130` for this laptop's GB10 (sm_121).
+Those wheels need NVIDIA driver >= 580, which most OSPool nodes do not have, so
+jobs would either not match or fail at CUDA init. The image instead builds on
+OSG's own PyTorch base (torch 2.3.1 / CUDA 11.8), whose wheels cover sm_70
+through sm_90 — V100, A100, A40, L40S. Results will not be bit-identical to
+local runs, which is true of any different GPU.
+
+## One-time setup
+
+### 1. Clone and install on the access point
+
+```bash
+git clone <your-repo-url> ~/Discrete_Generative_Models
+cd ~/Discrete_Generative_Models/CIS6270
+```
+
+No `uv sync` is needed on the access point for submitting — the jobs carry
+their own environment. Install it only if you also want to run `dgm-gfp-metrics`
+there to score results.
+
+### 2. Get the inputs onto the access point
+
+`project1_eval/data/` and `project1_eval/cache/` are gitignored, so a fresh
+clone has neither. Both are small for `esm2_8m`:
+
+```bash
+# data: scp from your laptop (13 MB), or rebuild with dgm-prepare-gfp
+mkdir -p project1_eval/data
+scp you@laptop:.../project1_eval/data/avgfp_{train_props.csv,wt.txt,oracle_v2.npz} \
+    project1_eval/data/
+
+# weights: fetch once (30 MB for esm2_8m)
+PYTHONPATH=$PWD/src python3 osg/bin/fetch_esm_weights.py --model esm2_8m
+```
+
+### 3. Build the image
+
+The `TMPDIR` exports and `--ignore-proot` are OSPool policy, not optional —
+building without them strains shared storage.
+
+```bash
+mkdir -p $HOME/tmp
+export TMPDIR=$HOME/tmp APPTAINER_TMPDIR=$HOME/tmp APPTAINER_CACHEDIR=$HOME/tmp
+cd osg/env
+apptainer build --ignore-proot dgm-gpu-v1.sif dgm-gpu.def
+```
+
+The definition's `%test` block imports every dependency, so an incompatible pin
+fails the build rather than every job. If it fails on `transformers` against
+torch 2.3.1, build `dgm-gpu-cuda126.def` instead — it pins torch itself — and
+set `IMAGE_VERSION` accordingly in the submit files.
+
+A PyTorch `.sif` is several GB, so stage it in OSDF rather than `/home`:
+
+```bash
+cp dgm-gpu-v1.sif /ospool/$AP/data/$USER/
+```
+
+**Bump the version on every rebuild.** OSDF caches by file name, so a rebuilt
+`dgm-gpu-v1.sif` can keep serving the old image.
+
+### 4. Fill in your identity
+
+In both `jobs/run_experiment.sub` and `jobs/sweep.sub`:
+
+```
+OSG_USER = your_username
+OSG_AP   = ap40          # whichever access point you log into
+```
+
+## Running
+
+```bash
+cd ~/Discrete_Generative_Models/CIS6270/project1_eval
+bash ../osg/bin/stage.sh --model esm2_8m \
+    --data data/avgfp_train_props.csv data/avgfp_wt.txt data/avgfp_oracle_v2.npz
+
+cd ../osg/jobs
+condor_submit run_experiment.sub
+condor_q
+```
+
+Staging produces about 21 MB in total — 128 KB of code, 1.8 MB of inputs,
+19 MB of weights — so everything goes through `transfer_input_files`. Re-run
+`stage.sh` whenever the code or the input files change.
+
+`run_experiment.sub` carries the full `long250` flag set as its default
+`RUN_ARGS`, character-for-character what you run locally. Edit it, or override:
+
+```bash
+condor_submit run_experiment.sub -append 'TAG = k5_t09'
+```
+
+For a sweep, the varying values live in `sweep_params.txt` and the shared flags
+in `BASE_ARGS` inside `sweep.sub`:
+
+```bash
+condor_submit sweep.sub
+```
+
+That split is forced by HTCondor: `queue ... from` splits each line on commas,
+so a value containing a comma — `--freeze-positions 63,64,65` — cannot live in
+the params file.
+
+## What comes back, and where
+
+| Artifact | Size | Destination |
+| --- | --- | --- |
+| `<tag>.tar.gz` — FASTA, run config, plots, log | ~1 MB | access point, `jobs/` |
+| `<tag>_flow_results.pt` | 200–400 MB | `osdf:///ospool/<ap>/data/<user>/runs/` |
+| `<tag>_diffusion_results.pt` | 200–400 MB | same |
+
+`results.pt` holds the latents and model weights, which is what makes
+`dgm-resample-cfg` and re-decoding at another mutation budget possible later —
+worth keeping, too big to pile up in `/home`. It goes to OSDF through
+`transfer_output_remaps`, which is the supported mechanism; do not call
+`stashcp` from the job.
+
+Unpack a finished run:
+
+```bash
+tar -xzf long250.tar.gz                       # -> results/long250/{flow,diffusion}
+cp /ospool/$AP/data/$USER/runs/long250_flow_results.pt \
+   results/long250/flow/results.pt
+```
+
+## Scoring
+
+Jobs run with `--no-oracle`: METL needs `pytorch-lightning` plus five more
+packages and a 64 MB checkout, which would be carried by every job to compute
+something that is pure post-processing. Score afterwards, locally or on the
+access point:
+
+```bash
+dgm-gfp-metrics --run-dir results/long250 \
+    --embedding-oracle project1_eval/data/avgfp_metl_oracle_v2.npz \
+    --train project1_eval/data/avgfp_train_props.csv --baseline-n 50
+```
+
+To score on the node instead, add METL to the image, stage the checkout, set
+`METL_ROOT`, and submit with `OSG_WITH_ORACLE=1` in the job environment.
+
+## Bigger models
+
+`esm2_8m` weights are 30 MB. Above roughly a gigabyte OSG asks you to use OSDF
+rather than `transfer_input_files`:
+
+| Model | Cache size | How to stage |
+| --- | --- | --- |
+| `esm2_8m` | 30 MB | tarball (default) |
+| `esm2_35m` | 130 MB | tarball |
+| `esm2_150m` | 568 MB | tarball |
+| `esm2_650m` | 2.5 GB | OSDF |
+| `esm2_3b` | 11 GB | OSDF |
+
+For the OSDF route, copy the cache directory up and swap the input line:
+
+```bash
+cp -r project1_eval/cache /ospool/$AP/data/$USER/esm-cache
+```
+
+```
+transfer_input_files = dgm-src.tar.gz, inputs.tar.gz, $(OSDF)/esm-cache/?recursive
+```
+
+The `?recursive` is required for directories. `run_experiment.sh` already
+detects a staged `cache/` directory and points `ESM2_CACHE` at it.
+
+## How the node is set up
+
+`run_experiment.sh` does this, in order:
+
+1. Unpacks the tarballs into the Condor scratch directory.
+2. Sets `DGM_ROOT` to the unpacked `CIS6270/`. `dgm.common.paths` validates it
+   contains `pyproject.toml` and `src/dgm`, so a bad tarball fails immediately
+   instead of writing results somewhere surprising.
+3. Puts `$DGM_ROOT/src` on `PYTHONPATH` — **no `pip install` at job time**, so
+   jobs need no network to start and a code change needs no image rebuild.
+4. Creates `project1_eval/{data,outputs,plots,cache,logs}`, which the clone
+   lacks because they are gitignored, and copies the staged inputs into `data/`.
+5. Points `ESM2_CACHE` at the staged weights and sets `HF_HUB_OFFLINE=1`, so a
+   missing weight fails loudly rather than every job pulling from HuggingFace.
+6. `cd`s into `project1_eval` so relative `--dataset data/...` flags resolve
+   exactly as they do locally.
+7. Runs `python -m dgm.project1.run_experiment`, then splits the outputs into
+   the small tarball and the per-modality `results.pt`.
+
+## Troubleshooting
+
+**Held jobs.** `condor_q -hold` and read the reason. Running past
+`+JobDurationCategory = "Medium"` (10 h) is the likely one for 250 epochs on a
+slower card; raise it to `"Long"` (20 h max).
+
+**Nothing matches.** Check `condor_q -better-analyze`. `require_gpus
+(Capability >= 7.0)` plus `gpus_minimum_memory = 16G` is restrictive; lower the
+memory first.
+
+**Image serves stale code or deps.** You rebuilt without bumping
+`IMAGE_VERSION`. OSDF caches by name.
+
+**`no staged ESM weights` warning in the log.** The weight tarball did not
+arrive, and the job then tried to download with `HF_HUB_OFFLINE=1` set and
+failed. Re-run `stage.sh`.
+
+**A zero-byte `results.pt`.** That modality did not finish. Both file names are
+always created because Condor fails the entire transfer — losing the small
+tarball with it — if a file named in `transfer_output_files` is missing. Read
+the `.err` log for the real failure.
+
+**Calibrating runtime.** Time a short run before committing to a sweep:
+
+```bash
+condor_submit run_experiment.sub -append 'TAG = cal10' \
+    -append 'RUN_ARGS = --esm-model esm2_8m --dataset data/avgfp_train_props.csv --max-length 237 --epochs 10 --samples 10 --batch-size 128 --arch transformer --hidden 256'
+```
+
+250 epochs costs roughly 25x the training portion of that.

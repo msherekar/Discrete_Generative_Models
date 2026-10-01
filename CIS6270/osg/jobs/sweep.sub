@@ -1,0 +1,64 @@
+# A sweep: one GPU job per line of a params file.
+#
+#   condor_submit sweep.sub
+#
+# Only the values that vary live in the params file; the fixed flags stay in
+# BASE_ARGS here. That split is deliberate -- `queue ... from` splits each line
+# on commas, so a flag value containing a comma (--freeze-positions 63,64,65)
+# cannot live in the params file.
+#
+# Keep the resource requests here in step with run_experiment.sub.
+
+OSG_USER = CHANGEME
+OSG_AP   = ap40
+OSDF     = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)
+IMAGE_VERSION = v1
+
+PARAMS = sweep_params.txt
+
+# Everything every arm of the sweep shares.
+BASE_ARGS = --esm-model esm2_8m \
+            --dataset data/avgfp_train_props.csv \
+            --max-length 237 \
+            --mut-budget 5 --exact-mutations \
+            --reference data/avgfp_wt.txt \
+            --restrict-support data/avgfp_oracle_v2.npz \
+            --decode-temperature 0.7 \
+            --freeze-positions 63,64,65 \
+            --minimize 2 \
+            --constraint-property 3 --constraint-rho 1.0 \
+            --arch transformer --hidden 256 \
+            --normalize-guidance --endpoint-guidance \
+            --cfg-weight 0 1 2 4 \
+            --batch-size 128 --epochs 250 --samples 100 \
+            --diffusion-steps 200
+
+universe        = container
+container_image = $(OSDF)/dgm-gpu-$(IMAGE_VERSION).sif
+
+executable = run_experiment.sh
+arguments  = "$(tag) $(BASE_ARGS) --dataset-tag $(tag) --seed $(seed) --sample-seed $(seed) --reward-eta $(eta)"
+
+transfer_input_files = dgm-src.tar.gz, inputs.tar.gz, esm-cache.tar.gz
+
+should_transfer_files   = YES
+when_to_transfer_output = ON_EXIT
+transfer_output_files   = $(tag).tar.gz, $(tag)_flow_results.pt, $(tag)_diffusion_results.pt
+transfer_output_remaps  = "$(tag)_flow_results.pt = $(OSDF)/runs/$(tag)_flow_results.pt; $(tag)_diffusion_results.pt = $(OSDF)/runs/$(tag)_diffusion_results.pt"
+
+request_gpus   = 1
+request_cpus   = 2
+request_memory = 16GB
+request_disk   = 20GB
+require_gpus        = (Capability >= 7.0)
+gpus_minimum_memory = 16G
++JobDurationCategory = "Medium"
+
+output = logs/$(tag).$(ClusterId).$(ProcId).out
+error  = logs/$(tag).$(ClusterId).$(ProcId).err
+log    = logs/sweep.$(ClusterId).log
+
+max_retries = 3
+
+# One job per line: tag, seed, eta.
+queue tag, seed, eta from $(PARAMS)
