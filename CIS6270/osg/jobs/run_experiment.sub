@@ -10,7 +10,7 @@
 # ── identity: the two values that are yours ──────────────────────────────────
 OSG_USER = mukul.sherekar
 OSG_AP   = ap40
-OSDF     = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)
+OSDF     = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/containers
 
 # Bump on every image rebuild: OSDF caches aggressively by file name.
 IMAGE_VERSION = v1
