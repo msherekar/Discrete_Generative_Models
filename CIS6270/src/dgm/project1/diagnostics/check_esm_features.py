@@ -22,8 +22,6 @@ Usage:
   python diagnostics/check_esm_features.py --train-n 8000 --esm-model esm2_150m
 """
 import argparse
-import sys
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -31,12 +29,13 @@ from scipy.stats import spearmanr
 from sklearn.linear_model import Ridge
 from transformers import AutoTokenizer, EsmForMaskedLM
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from gfp_oracle import featurize                            # noqa: E402
-from embedding_oracle import ESM_HF                         # noqa: E402
+from dgm.common.paths import REPO_ROOT, project_dir
 
-DMS = ROOT.parent.parent / "Data_GFP" / "data" / "dms_data" / "avgfp"
+ROOT = project_dir()
+from ..gfp_oracle import featurize                            # noqa: E402
+from ..embedding_oracle import ESM_HF                         # noqa: E402
+
+DMS = REPO_ROOT / "Data_GFP" / "data" / "dms_data" / "avgfp"
 TASKS = {
     "A in-support (standard)":
         "splits/standard/standard_tr0.8_tu0.1_te0.1_w1abc2f4e9a64_r3597",

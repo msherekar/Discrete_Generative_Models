@@ -14,7 +14,7 @@ and nothing to calibrate. Diffusion additionally reports how many samples
 numerically diverged, since that is where the two variants differ most.
 
 Usage:
-  python plot_guidance_sweep.py --prefix ep --seeds 11 12 13 14 15 --etas 1 5 20 50
+  dgm-plot-guidance-sweep --prefix ep --seeds 11 12 13 14 15 --etas 1 5 20 50
 """
 import argparse
 from pathlib import Path
@@ -25,7 +25,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-ROOT = Path(__file__).resolve().parent
+from dgm.common.paths import project_dir
+
+ROOT = project_dir()
 POLAR = "DEHKNQRST"
 VARIANTS = {"st": "state-based", "ep": "endpoint"}
 COLORS = {"st": "tab:gray", "ep": "tab:blue"}

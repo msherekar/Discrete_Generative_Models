@@ -8,15 +8,12 @@ test the gradient itself, which is where the objective semantics live.
 
   python diagnostics/check_objective.py
 """
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 import torch.nn.functional as F
 
-import run_experiment as R
+from dgm.project1 import run_experiment as R
 
 FAILURES: list[str] = []
 

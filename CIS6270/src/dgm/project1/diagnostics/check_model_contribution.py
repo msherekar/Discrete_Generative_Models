@@ -19,7 +19,6 @@ Usage:
   python diagnostics/check_model_contribution.py --run-dir outputs/... --budget 5
 """
 import argparse
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -27,10 +26,11 @@ import torch
 from scipy.stats import mannwhitneyu
 from transformers import AutoTokenizer, EsmForMaskedLM
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-import run_experiment as R              # noqa: E402
-import embedding_oracle as embo         # noqa: E402
+from dgm.common.paths import project_dir
+
+ROOT = project_dir()
+from dgm.project1 import run_experiment as R              # noqa: E402
+from dgm.project1 import embedding_oracle as embo         # noqa: E402
 
 METHODS = ("flow", "diffusion")
 MODES = ("cfg", "single", "multi")

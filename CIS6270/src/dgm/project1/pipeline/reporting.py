@@ -137,5 +137,5 @@ def oracle_summary(args, setup, arms, flow_latents, diff_latents,
         _budget_table(runs)
     _collapse_warning(runs)
     print("\n  For the random-variant control and the full metric table, run:")
-    print(f"    python gfp_metrics.py --run-dir {out_root} \\")
+    print(f"    dgm-gfp-metrics --run-dir {out_root} \\")
     print(f"        --embedding-oracle {oracle_path} --baseline-n 50")

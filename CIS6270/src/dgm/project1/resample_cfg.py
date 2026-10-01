@@ -23,12 +23,12 @@ restriction, anchor strength, seeds -- is read back from the saved config, so
 the new arms are directly comparable to the original ones.
 
 Usage:
-  python resample_cfg.py --run-dir outputs/esm2_8m_calib3 --cfg-weight 0 1 2 4
-  python resample_cfg.py --run-dir outputs/esm2_8m_calib3 --cfg-weight 0 2 \
+  dgm-resample-cfg --run-dir outputs/esm2_8m_calib3 --cfg-weight 0 1 2 4
+  dgm-resample-cfg --run-dir outputs/esm2_8m_calib3 --cfg-weight 0 2 \
       --samples 100 --out-dir outputs/esm2_8m_calib3_cfg
 
 Then score it exactly like a normal run:
-  python gfp_metrics.py --run-dir outputs/esm2_8m_calib3_cfg \
+  dgm-gfp-metrics --run-dir outputs/esm2_8m_calib3_cfg \
       --oracle data/avgfp_oracle_v2.npz \
       --embedding-oracle data/avgfp_metl_oracle_v2.npz --baseline-n 50
 """
@@ -38,9 +38,11 @@ from pathlib import Path
 import numpy as np
 import torch
 
-import run_experiment as R
+from dgm.project1 import run_experiment as R
 
-ROOT = Path(__file__).resolve().parent
+from dgm.common.paths import project_dir
+
+ROOT = project_dir()
 
 
 def parse_args():
@@ -53,6 +55,20 @@ def parse_args():
                         help="Weights to sample (default: 0 1 2 4). 0 is the "
                              "unconditional control, 1 the ordinary conditional "
                              "field, above 1 extrapolates.")
+    parser.add_argument("--condition", type=int, nargs="+", default=[1],
+                        metavar="C",
+                        help="Condition labels to sample (default: 1). On the "
+                             "avGFP split c=1 is bright (training mean r1 -0.175) "
+                             "and c=0 is dark (-2.282), so '0 1' contrasts two "
+                             "labels the data separates by 2.1 brightness units. "
+                             "That is the test of whether the learned conditional "
+                             "direction is SEMANTICALLY right rather than merely "
+                             "nonzero: a w sweep on one label shows only that the "
+                             "field moves, while c=0 against c=1 at the same w "
+                             "shows whether it moves the way the label means. If "
+                             "the two are indistinguishable, the condition was "
+                             "never learned; if they separate in the latent but "
+                             "not after decoding, the decode is what erases it.")
     parser.add_argument("--samples", type=int, default=None,
                         help="Samples per arm (default: whatever the run used).")
     parser.add_argument("--out-dir", type=Path, default=None,
@@ -62,6 +78,14 @@ def parse_args():
                         help="Scoring oracle (default: the one the run used).")
     parser.add_argument("--sample-seed", type=int, default=None,
                         help="Override the run's sampling seed.")
+    parser.add_argument("--clean", action="store_true",
+                        help="Delete arms already in --out-dir that this run does "
+                             "not itself produce. Without it they are kept and "
+                             "reported, because they may be deliberate; but a "
+                             "scoring tool reads whatever FASTA files it finds, so "
+                             "arms left from an earlier invocation with different "
+                             "settings will be scored as though they belonged to "
+                             "this one.")
     parser.add_argument("--cache-dir", type=Path, default=ROOT / "cache")
     return parser.parse_args()
 
@@ -180,10 +204,32 @@ def main():
         print(f"\n  {method}: {n_samples} samples/arm, seed {seed}, budget {primary}"
               f"{', anchored ' + str(strength) if anchor is not None else ''}")
 
+        # At w=0 the samplers evaluate the null field and never look at c
+        # (v = model(z, t, null); the conditional term is gated on `if w`), so
+        # every condition collapses to one arm there. Emitting it once keeps the
+        # table honest rather than printing identical rows under different names.
+        arms, seen_unconditional = [], False
+        for c in args.condition:
+            for w in args.cfg_weight:
+                if w == 0.0:
+                    if seen_unconditional:
+                        continue
+                    seen_unconditional = True
+                    arms.append((None, 0.0))
+                else:
+                    arms.append((c, w))
+        multi = len(args.condition) > 1
+
         latents = {}
-        for i, w in enumerate(args.cfg_weight):
-            name = "cfg" if i == 0 else f"cfg@{w:g}"
-            common = dict(n=n_samples, c=1, w=float(w), eta=0.0, lambdas=lambdas,
+        for i, (c, w) in enumerate(arms):
+            if c is None:
+                name = "cfg" if i == 0 else "uncond"
+            elif multi:
+                name = f"c{c}" + ("" if w == 1.0 else f"@{w:g}")
+            else:
+                name = "cfg" if i == 0 else f"cfg@{w:g}"
+            common = dict(n=n_samples, c=int(c or 0), w=float(w), eta=0.0,
+                          lambdas=lambdas,
                           anchor=anchor, strength=strength, seed=seed,
                           objective=objective)
             if method == "flow":
@@ -196,17 +242,34 @@ def main():
             entry = R.decode_all_budgets(z, decode_fns, primary, oracle)
             latents[name] = entry
             scores = entry.get("oracle")
-            line = (f"    {name:9s} w={w:<5g} unique {len(set(entry['sequences']))}"
+            label = "uncond" if c is None else f"c={c}"
+            line = (f"    {name:9s} {label:7s} w={w:<5g} "
+                    f"unique {len(set(entry['sequences']))}"
                     f"/{len(entry['sequences'])}")
             if scores is not None:
                 scores = np.asarray(scores)
                 line += (f"   oracle mean {scores.mean():+.4f}"
                          f"   best {scores.max():+.4f}")
-                table.append({"method": method, "w": w, "arm": name,
+                table.append({"method": method, "w": w, "arm": name, "c": c,
+                              "latent": entry["latent"].detach().cpu(),
                               "mean": float(scores.mean()), "best": float(scores.max()),
                               "unique": len(set(entry["sequences"]))})
             print(line)
 
+        stale = sorted(f.stem for f in (out_dir / method).glob("*.fasta")
+                       if f.stem not in latents) if (out_dir / method).is_dir() else []
+        if stale:
+            if args.clean:
+                for name in stale:
+                    (out_dir / method / f"{name}.fasta").unlink()
+                print(f"    removed {len(stale)} arm(s) from an earlier run: "
+                      f"{', '.join(stale)}")
+            else:
+                print(f"    [warn] {len(stale)} arm(s) already in {out_dir / method} "
+                      f"are not produced by this run: {', '.join(stale)}")
+                print(f"           gfp_metrics.py scores every FASTA it finds, so "
+                      f"these will appear in the table as if they came from these "
+                      f"settings. Pass --clean to remove them.")
         R.save_results(out_dir, method, latents, model, reward, stats,
                        saved["esm_name"], saved["length"], saved["dim"],
                        saved.get("min_polar", 12), saved.get("losses", []),
@@ -215,23 +278,63 @@ def main():
                         "resampled_from": str(args.run_dir)})
 
     if table:
-        print(f"\n  CFG sweep (w=0 is the unconditional control)")
-        print(f"  {'method':11s}{'w':>6}{'mean':>10}{'best':>10}{'unique':>9}"
-              f"{'delta vs w=0':>14}")
+        print(f"\n  Sweep (w=0 is the unconditional control; c is the condition label)")
+        print(f"  {'method':11s}{'arm':9s}{'c':>5}{'w':>5}{'mean':>10}{'best':>10}"
+              f"{'unique':>8}{'delta vs uncond':>17}")
         for method in methods:
             rows = [r for r in table if r["method"] == method]
             base = next((r["mean"] for r in rows if r["w"] == 0.0), None)
             for r in rows:
                 delta = "" if base is None else f"{r['mean'] - base:+.4f}"
-                print(f"  {r['method']:11s}{r['w']:>6g}{r['mean']:>10.4f}"
-                      f"{r['best']:>10.4f}{r['unique']:>9d}{delta:>14}")
+                label = "-" if r["c"] is None else str(r["c"])
+                print(f"  {r['method']:11s}{r['arm']:9s}{label:>5}{r['w']:>5g}"
+                      f"{r['mean']:>10.4f}{r['best']:>10.4f}{r['unique']:>8d}{delta:>17}")
+
+        # The contrast the condition sweep exists for: same w, opposite labels.
+        # A w sweep on one label only shows that the field moves; this shows
+        # whether it moves the way the label means.
+        pairs = []
+        for method in methods:
+            rows = [r for r in table if r["method"] == method and r["c"] is not None]
+            for w in sorted({r["w"] for r in rows}):
+                at_w = {r["c"]: r for r in rows if r["w"] == w}
+                if 0 in at_w and 1 in at_w:
+                    # Separating these two tells you WHERE the condition is lost.
+                    # A latent gap with no property gap means the field carried
+                    # the condition and the decode discarded it; no latent gap
+                    # means the field never learned it.
+                    gap = float((at_w[1]["latent"] - at_w[0]["latent"])
+                                .flatten(1).norm(dim=1).mean())
+                    scale = float(at_w[1]["latent"].flatten(1).norm(dim=1).mean())
+                    pairs.append((method, w, at_w[1]["mean"], at_w[0]["mean"],
+                                  gap, scale))
+        if pairs:
+            print(f"\n  Condition contrast: does conditioning move the property "
+                  f"the way the label means?")
+            print(f"  {'method':11s}{'w':>5}{'c=1 (bright)':>15}{'c=0 (dark)':>13}"
+                  f"{'separation':>13}{'latent gap':>13}{'% of |z|':>10}")
+            for method, w, bright, dark, gap, scale in pairs:
+                print(f"  {method:11s}{w:>5g}{bright:>15.4f}{dark:>13.4f}"
+                      f"{bright - dark:>+13.4f}{gap:>13.2f}"
+                      f"{gap / max(scale, 1e-9):>9.1%}")
+            print(f"  The avGFP training labels are separated by 2.107 (c=1 mean "
+                  f"r1 -0.175, c=0 mean -2.282).")
+            print(f"  Read the two columns together. A latent gap with no "
+                  f"property separation means the field")
+            print(f"  carried the condition and the decode discarded it; no "
+                  f"latent gap means the field never")
+            print(f"  learned it. Compare the gap against the decode projection "
+                  f"that check_reward_transfer.py")
+            print(f"  reports for the same run.")
+        elif len(args.condition) > 1:
+            print("\n  No c=0/c=1 pair at a shared w>0, so no contrast to report.")
         if not any(r["w"] == 0.0 for r in table):
             print("\n  No w=0 arm: without the unconditional control this sweep "
                   "shows how the result varies with w, not what the conditioning "
                   "contributes.")
 
     print(f"\nDone. Score it with:\n"
-          f"  python gfp_metrics.py --run-dir {out_dir} \\\n"
+          f"  dgm-gfp-metrics --run-dir {out_dir} \\\n"
           f"      --oracle data/avgfp_oracle_v2.npz \\\n"
           f"      --embedding-oracle data/avgfp_metl_oracle_v2.npz --baseline-n 50")
 

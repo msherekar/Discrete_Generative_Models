@@ -36,17 +36,17 @@ Run it on the output of resample_cfg.py --condition 0 1.
 import argparse
 import csv
 import random
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 import torch.nn.functional as F
 
-import run_experiment as R
+from dgm.project1 import run_experiment as R
 
-ROOT = Path(__file__).resolve().parent.parent
+from dgm.common.paths import project_dir
+
+ROOT = project_dir()
 
 
 def parse_args():

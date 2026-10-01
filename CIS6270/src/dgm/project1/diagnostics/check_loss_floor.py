@@ -29,15 +29,15 @@ Usage:
 """
 import argparse
 import csv
-import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 from transformers import AutoTokenizer, EsmForMaskedLM
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+from dgm.common.paths import project_dir
+
+ROOT = project_dir()
 
 
 def main():

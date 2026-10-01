@@ -22,19 +22,18 @@ Usage:
   python diagnostics/check_circularity.py --fit-n 8000 --budget 4 --noise 0.7
 """
 import argparse
-import sys
-from pathlib import Path
 
 import numpy as np
 import torch
 from sklearn.linear_model import Ridge
 from transformers import AutoTokenizer, EsmForMaskedLM
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from gfp_oracle import featurize                                   # noqa: E402
+from dgm.common.paths import REPO_ROOT, project_dir
 
-DMS         = ROOT.parent.parent / "Data_GFP" / "data" / "dms_data" / "avgfp"
+ROOT = project_dir()
+from ..gfp_oracle import featurize                                   # noqa: E402
+
+DMS         = REPO_ROOT / "Data_GFP" / "data" / "dms_data" / "avgfp"
 AMINO_ACIDS = "ACDEFGHIKLMNPQRSTVWY"
 
 

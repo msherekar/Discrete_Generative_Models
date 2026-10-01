@@ -47,7 +47,7 @@ def load_results(method: str, out_dir: Path | None = None):
     if out_dir is None:
         out_dir = LECTURE3 / f"esm2_{method}_outputs"
         fallback_msg = (
-            f"Run lecture_3/esm2_{method}_guidance.py --epochs 200, "
+            f"Run lecture/lecture_3/esm2_{method}_guidance.py --epochs 200, "
             f"or use run_experiment.py and pass --{method}-outdir."
         )
     else:

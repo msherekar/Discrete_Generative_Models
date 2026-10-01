@@ -6,8 +6,8 @@ Replaces the composition proxies in evaluate.py with function-grounded metrics f
 the avGFP study. Reads the FASTA files written by run_experiment.py.
 
 Usage:
-  python gfp_metrics.py --run-dir outputs/esm2_8m_avgfp_train_4000
-  python gfp_metrics.py --run-dir outputs/... --train data/avgfp_train_4000.csv
+  dgm-gfp-metrics --run-dir outputs/esm2_8m_avgfp_train_4000
+  dgm-gfp-metrics --run-dir outputs/... --train data/avgfp_train_4000.csv
 """
 import argparse, csv, random
 from pathlib import Path
@@ -17,11 +17,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from gfp_oracle import in_domain, load_fasta, load_oracle, score_sequences
+from .gfp_oracle import in_domain, load_fasta, load_oracle, score_sequences
 
-import embedding_oracle as embo
+from dgm.project1 import embedding_oracle as embo
 
-ROOT        = Path(__file__).resolve().parent
+from dgm.common.paths import project_dir
+
+ROOT        = project_dir()
 METHODS     = ("flow", "diffusion")
 MODES       = ("cfg", "single", "multi")
 CHROMOPHORE = (63, 64, 65)
@@ -277,8 +279,15 @@ def main():
         print(f"  Second oracle: {embedding[3]} backend, from {args.embedding_oracle.name}")
 
     train_path = args.train or training_set_from_run(args.run_dir)
-    if train_path is None or not train_path.is_file():
-        parser.error(f"could not find the training CSV ({train_path}); pass --train")
+    if train_path is None:
+        raise SystemExit(
+            f"{args.run_dir} records no training set, so novelty and the "
+            f"reference cloud cannot be computed; pass --train")
+    if not train_path.is_file():
+        raise SystemExit(
+            f"the training set this run recorded is missing: {train_path}\n"
+            f"It has moved or was never on this machine; pass --train with its "
+            f"current location.")
     print(f"  Training set: {train_path.name}")
 
     with train_path.open(newline="") as f:

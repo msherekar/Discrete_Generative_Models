@@ -25,8 +25,8 @@ Two feature extractors, because the usual one is a poor fit for MNIST:
 Report which one was used; do not mix the two scales in one table.
 
 Usage:
-  python compute_fid.py --prefix mn --seeds 11 12 13 14 15 --etas 1 2 5 10
-  python compute_fid.py --prefix mn --features mnist --etas 1 5 20 50
+  dgm-compute-fid --prefix mn --seeds 11 12 13 14 15 --etas 1 2 5 10
+  dgm-compute-fid --prefix mn --features mnist --etas 1 5 20 50
 """
 import argparse
 import csv
@@ -37,7 +37,9 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-ROOT = Path(__file__).resolve().parent
+from dgm.common.paths import SHARED_DATA, project_dir
+
+ROOT = project_dir()
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MODES = ("cfg", "single", "multi")
 
@@ -134,7 +136,7 @@ def main():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--prefix", default="mn")
     p.add_argument("--outputs", type=Path, default=ROOT / "outputs")
-    p.add_argument("--data-dir", type=Path, default=ROOT.parent / "data")
+    p.add_argument("--data-dir", type=Path, default=SHARED_DATA)
     p.add_argument("--variants", nargs="+", default=["st", "ep"])
     p.add_argument("--etas", nargs="+", default=["1", "2", "5", "10"])
     p.add_argument("--seeds", type=int, nargs="+", default=[11, 12, 13, 14, 15])

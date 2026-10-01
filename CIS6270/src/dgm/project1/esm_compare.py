@@ -37,9 +37,9 @@ split contains, accuracy on substitutions it does not, and what fraction of a
 held-out set each covers.
 
 Usage:
-  python esm_compare.py --limit 4000                      # quick, one model
-  python esm_compare.py --models onehot aaemb pca16 aug
-  python esm_compare.py --esm esm2_150m --models pca16 aug
+  dgm-esm-compare --limit 4000                      # quick, one model
+  dgm-esm-compare --models onehot aaemb pca16 aug
+  dgm-esm-compare --esm esm2_150m --models pca16 aug
 """
 import argparse
 import csv
@@ -52,9 +52,11 @@ from scipy.sparse import csr_matrix, hstack as sparse_hstack
 from scipy.stats import spearmanr
 from sklearn.linear_model import Ridge
 
-from gfp_oracle import AA_INDEX, AMINO_ACIDS, featurize, support_of
+from .gfp_oracle import AA_INDEX, AMINO_ACIDS, featurize, support_of
 
-ROOT = Path(__file__).resolve().parent
+from dgm.common.paths import METL_ROOT, REPO_ROOT, project_dir
+
+ROOT = project_dir()
 ESM_HF = {"esm2_8m": "facebook/esm2_t6_8M_UR50D",
           "esm2_35m": "facebook/esm2_t12_35M_UR50D",
           "esm2_150m": "facebook/esm2_t30_150M_UR50D",
@@ -79,8 +81,8 @@ def read_split(path):
 
 def find_dms_root():
     """METL's avgfp directory, under either checkout name."""
-    for candidate in (ROOT.parent.parent / "metl" / "data" / "dms_data" / "avgfp",
-                      ROOT.parent.parent / "Data_GFP" / "data" / "dms_data" / "avgfp"):
+    for candidate in (METL_ROOT / "data" / "dms_data" / "avgfp",
+                      REPO_ROOT / "Data_GFP" / "data" / "dms_data" / "avgfp"):
         if (candidate / "avgfp.tsv").is_file():
             return candidate
     raise SystemExit("cannot find METL's dms_data/avgfp directory")
@@ -99,7 +101,7 @@ def read_metl_task(task, wt):
     something other than a rounding error: an indicator for an unseen
     substitution has no coefficient at all.
     """
-    from prepare_gfp import apply_variant
+    from .prepare_gfp import apply_variant
     dms = find_dms_root()
     rows = [line.rstrip().split("\t") for line in
             (dms / "avgfp.tsv").read_text().splitlines()[1:]]
@@ -336,7 +338,7 @@ def main():
             # correlated failure that reads as success. METL shares no
             # architecture, tokenizer or pretraining corpus with ESM-2, so its
             # score is external evidence rather than the generator grading itself.
-            from embedding_oracle import encode_metl
+            from .embedding_oracle import encode_metl
             feats = {n: encode_metl(s, wt) for n, (s, _) in splits.items()}
             fit_and_score("METL (fc1)", feats, splits, support, wt, results)
             del feats

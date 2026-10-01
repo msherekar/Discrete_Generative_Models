@@ -6,9 +6,9 @@ run_experiment.py, plus a disjoint remainder split used to fit the brightness
 oracle in gfp_oracle.py.
 
 Usage:
-  python prepare_gfp.py                          # 4000 training variants, oracle split
-  python prepare_gfp.py --n 8000 --threshold -1.0
-  python prepare_gfp.py --max-mutations 8 --oracle-n 20000
+  dgm-prepare-gfp                          # 4000 training variants, oracle split
+  dgm-prepare-gfp --n 8000 --threshold -1.0
+  dgm-prepare-gfp --max-mutations 8 --oracle-n 20000
 
 Rewards (larger is better):
   r1 = brightness score (log-scale, wild-type centered)
@@ -18,8 +18,10 @@ import argparse, csv, random, re
 from collections import defaultdict
 from pathlib import Path
 
-ROOT        = Path(__file__).resolve().parent
-DATA_ROOT   = ROOT.parent.parent / "Data_GFP" / "data" / "dms_data"
+from dgm.common.paths import COURSE_ROOT, REPO_ROOT, project_dir
+
+ROOT        = project_dir()
+DATA_ROOT   = REPO_ROOT / "Data_GFP" / "data" / "dms_data"
 CHROMOPHORE = (63, 64, 65)          # 0-indexed S-Y-G in the METL avGFP numbering
 FIELDS      = ["sequence", "c", "r1", "r2", "variant", "num_mutations", "score"]
 
@@ -100,7 +102,7 @@ def write_csv(path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
     bright = sum(r["c"] for r in rows)
     try:
-        shown = path.relative_to(ROOT.parent)
+        shown = path.relative_to(COURSE_ROOT)
     except ValueError:            # --outdir outside the project tree
         shown = path
     print(f"  {shown}: {len(rows)} variants "
@@ -162,7 +164,7 @@ def main():
     write_csv(args.outdir / f"{key}_train_{len(train)}.csv", train)
     write_csv(args.outdir / f"{key}_oracle.csv", oracle)
     (args.outdir / f"{key}_wt.txt").write_text(wt + "\n")
-    print(f"\nNext: python run_experiment.py --esm-model esm2_8m "
+    print(f"\nNext: dgm-run-experiment --esm-model esm2_8m "
           f"--dataset data/{key}_train_{len(train)}.csv --max-length {len(wt)} "
           f"--min-polar 0 --mut-budget 12 --plot --ablate")
 

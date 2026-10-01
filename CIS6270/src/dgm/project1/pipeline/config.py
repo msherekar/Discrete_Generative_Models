@@ -7,7 +7,8 @@ from pathlib import Path
 
 import torch
 
-ROOT   = Path(__file__).resolve().parent.parent
+from dgm.common.paths import cache_dir
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 AMINO_ACIDS    = "ACDEFGHIKLMNPQRSTVWY"
@@ -18,11 +19,11 @@ CONDITION_DROP = 0.2
 # One HuggingFace cache for every model and every run. HF already namespaces
 # downloads as models--facebook--<name>, so an extra per-model or per-run
 # subdirectory only causes the same weights to be fetched again.
-DEFAULT_CACHE = ROOT / "cache"
+DEFAULT_CACHE = cache_dir()
 
 
 def resolve_cache_dir(override=None) -> Path:
-    """Shared ESM-2 weight cache: --cache-dir, else $ESM2_CACHE, else ROOT/cache."""
+    """Shared ESM-2 weight cache: --cache-dir, else $ESM2_CACHE, else the project's."""
     import os
     chosen = override or os.environ.get("ESM2_CACHE") or DEFAULT_CACHE
     path = Path(chosen).expanduser().resolve()

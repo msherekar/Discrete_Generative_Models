@@ -23,12 +23,11 @@ Rewards, both exact functions of the image so there is no oracle error:
   r2  left-right mirror symmetry -- correlation between an image and its flip
 
 Usage:
-  python run_mnist.py --epochs 20 --samples 100
-  python run_mnist.py --epochs 20 --reward-eta 20 --endpoint-guidance
-  python run_mnist.py --epochs 20 --predict x0 --ema 0.99
+  dgm-run-mnist --epochs 20 --samples 100
+  dgm-run-mnist --epochs 20 --reward-eta 20 --endpoint-guidance
+  dgm-run-mnist --epochs 20 --predict x0 --ema 0.99
 """
 import argparse
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -37,10 +36,11 @@ from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
-ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT))
+from dgm.common.paths import SHARED_DATA, project_dir
+
+ROOT = project_dir()
 # Every guidance and path mechanism is imported, never re-written.
-from run_experiment import (          # noqa: E402
+from .run_experiment import (          # noqa: E402
     EMA, INTERPOLANTS, endpoint_from_noise, endpoint_from_velocity,
     interpolate, make_ddpm_schedule, reward_gradient, sample_timesteps,
 )
@@ -311,7 +311,7 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dataset-tag", default="mnist")
-    p.add_argument("--data-dir", type=Path, default=ROOT.parent / "data")
+    p.add_argument("--data-dir", type=Path, default=SHARED_DATA)
     p.add_argument("--limit", type=int, default=20000, help="Training images")
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--samples", type=int, default=100)

@@ -26,18 +26,18 @@ clean their error bars look.
 import argparse
 import csv
 import random
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 import torch
 from scipy.stats import spearmanr
 
-import run_experiment as R
+from dgm.project1 import run_experiment as R
 
-ROOT = Path(__file__).resolve().parent.parent
+from dgm.common.paths import project_dir
+
+ROOT = project_dir()
 
 # Below this, guidance arms are not measuring the property they claim to.
 USABLE = 0.5

@@ -7,8 +7,9 @@ import contextlib
 import os
 from pathlib import Path
 
-ROOT        = Path(__file__).resolve().parent.parent
-METL_ROOT   = ROOT.parent.parent / "metl"
+from dgm.common.paths import METL_ROOT, project_dir
+
+ROOT        = project_dir()
 METL_CKPT   = METL_ROOT / "pretrained_models" / "Hr4GNHws.pt"
 METL_PDB    = "1gfl_cm.pdb"
 AMINO_ACIDS = "ACDEFGHIKLMNPQRSTVWY"

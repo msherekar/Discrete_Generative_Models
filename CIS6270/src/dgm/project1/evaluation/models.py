@@ -11,7 +11,7 @@ from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
-from models import get_model
+from dgm.common.esm_models import get_model
 
 from .loaders import composition_proxies
 from .style import (BATCH_SIZE, CONDITION_DROP, DEVICE, HIDDEN, LECTURE3,

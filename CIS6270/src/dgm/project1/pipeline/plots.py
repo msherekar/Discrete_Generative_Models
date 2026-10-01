@@ -6,7 +6,7 @@ figures are guaranteed to describe the run that just happened.
 """
 import csv
 
-from .config import ROOT
+from dgm.common.paths import plots_dir
 
 
 def _plot_payload(latents, model, reward, setup, min_polar) -> dict:
@@ -30,9 +30,9 @@ def generate_plots(args, setup, flow, diff, run_tag):
     carries the DDPM schedule as a fifth element for the ablation.
     """
     print("\nGenerating plots...")
-    import sys
-    sys.path.insert(0, str(ROOT))
-    from evaluate import (
+    # Imported here, not at module scope: evaluate imports matplotlib and the
+    # whole figure stack, which a run without --plot should not pay for.
+    from ..evaluate import (
         plot_training_loss, plot_composition_proxies, plot_latent_pca,
         plot_aa_composition, plot_polar_residue_distribution,
         plot_reward_pareto, plot_positional_entropy,
@@ -52,7 +52,7 @@ def generate_plots(args, setup, flow, diff, run_tag):
         train_seqs = [r["sequence"].strip().upper() for r in csv.DictReader(f)]
 
     prefix   = run_tag
-    plot_dir = ROOT / "plots" / run_tag
+    plot_dir = plots_dir() / run_tag
     plot_dir.mkdir(parents=True, exist_ok=True)
 
     # Raw metric CSVs — written before plots so data is always there.

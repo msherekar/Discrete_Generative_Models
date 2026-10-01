@@ -8,7 +8,9 @@ from pathlib import Path
 
 import numpy as np
 
-from .common import ESM_HF, ROOT, device
+from dgm.common.paths import cache_dir as project_cache
+
+from .common import ESM_HF, device
 from .metl import encode_metl
 
 def encode_esm(sequences: list[str], wt: str, tag: str,
@@ -18,7 +20,7 @@ def encode_esm(sequences: list[str], wt: str, tag: str,
     from transformers import AutoTokenizer, EsmForMaskedLM
     if tag not in ESM_HF:
         raise ValueError(f"Unknown ESM tag '{tag}'. Known: {', '.join(ESM_HF)}")
-    cache_dir = cache_dir or ROOT / "cache"
+    cache_dir = cache_dir or project_cache()
     tokenizer = AutoTokenizer.from_pretrained(ESM_HF[tag], cache_dir=str(cache_dir))
     model = EsmForMaskedLM.from_pretrained(
         ESM_HF[tag], cache_dir=str(cache_dir), use_safetensors=True
@@ -78,7 +80,7 @@ def _stream_delta(sequences, wt, tag, cache_dir=None, batch_size=32):
     from transformers import AutoTokenizer, EsmForMaskedLM
     if tag not in ESM_HF:
         raise ValueError(f"Unknown ESM tag '{tag}'. Known: {', '.join(ESM_HF)}")
-    cache_dir = cache_dir or ROOT / "cache"
+    cache_dir = cache_dir or project_cache()
     tokenizer = AutoTokenizer.from_pretrained(ESM_HF[tag], cache_dir=str(cache_dir))
     model = EsmForMaskedLM.from_pretrained(
         ESM_HF[tag], cache_dir=str(cache_dir), use_safetensors=True

@@ -26,14 +26,13 @@ exactly why a single run never mixes them. standard/val and standard/stest
 (9,827 variants) are touched by nothing here.
 
 Usage:
-  python oracle_sweep.py                         # all tasks, all default models
-  python oracle_sweep.py --models metl --append  # one model at a time, resumable
-  python oracle_sweep.py --train-n 20000         # cap training if memory is tight
+  dgm-oracle-sweep                         # all tasks, all default models
+  dgm-oracle-sweep --models metl --append  # one model at a time, resumable
+  dgm-oracle-sweep --train-n 20000         # cap training if memory is tight
 """
 import argparse
 import gc
 import json
-import sys
 import time
 from pathlib import Path
 
@@ -41,12 +40,13 @@ import numpy as np
 from scipy.stats import spearmanr
 from sklearn.linear_model import Ridge
 
-ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT))
-from gfp_oracle import featurize                      # noqa: E402
-from embedding_oracle import ESM_HF, encode_metl, encode_esm, seq_to_variant  # noqa: E402
+from dgm.common.paths import REPO_ROOT, project_dir
 
-DMS = ROOT.parent.parent / "Data_GFP" / "data" / "dms_data" / "avgfp"
+ROOT = project_dir()
+from .gfp_oracle import featurize                      # noqa: E402
+from .embedding_oracle import ESM_HF, encode_metl, encode_esm, seq_to_variant  # noqa: E402
+
+DMS = REPO_ROOT / "Data_GFP" / "data" / "dms_data" / "avgfp"
 TASKS = {
     "in-support":     "splits/standard/standard_tr0.8_tu0.1_te0.1_w1abc2f4e9a64_r3597",
     "unseen-subs":    "splits/mutation/mutation_tr-muts0.8_tu0.1_r4419",

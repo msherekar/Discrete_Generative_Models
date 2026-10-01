@@ -6,7 +6,7 @@ rather than a restatement of the objective.
 """
 from pathlib import Path
 
-from .config import ROOT
+from dgm.common.paths import data_dir
 
 def decode_all_budgets(z, decode_fns, primary, oracle):
     """Decode one set of latents at every requested mutation budget.
@@ -40,7 +40,7 @@ def load_brightness_oracle(path: Path):
     if path is None or not Path(path).is_file():
         return None
     try:
-        import embedding_oracle
+        from .. import embedding_oracle
         oracle = embedding_oracle.load_oracle(Path(path))
     except Exception as exc:
         print(f"  [skip] could not load oracle {path}: {type(exc).__name__}: {exc}")
@@ -53,7 +53,7 @@ def score_with_oracle(sequences, oracle):
     """Predicted brightness for decoded sequences, or None if no oracle."""
     if oracle is None:
         return None
-    import embedding_oracle
+    from .. import embedding_oracle
     return embedding_oracle.score_sequences(list(sequences), oracle)
 
 
@@ -64,7 +64,7 @@ def resolve_oracle(args, length):
     meaningless: an oracle is fitted to one protein at one length, so silently
     scoring a different one would produce confident nonsense.
     """
-    default_oracle = ROOT / "data" / "avgfp_metl_oracle.npz"
+    default_oracle = data_dir() / "avgfp_metl_oracle.npz"
     oracle_path = None if args.no_oracle else (
         args.oracle or (default_oracle if default_oracle.is_file() else None))
     oracle = load_brightness_oracle(oracle_path)
@@ -74,5 +74,5 @@ def resolve_oracle(args, length):
         return None, None
     if oracle is None and not args.no_oracle and oracle_path is not None:
         print("  No brightness oracle loaded; samples will not be scored. "
-              "Fit one with: python embedding_oracle.py --fit --backend metl")
+              "Fit one with: dgm-embedding-oracle --fit --backend metl")
     return oracle, oracle_path

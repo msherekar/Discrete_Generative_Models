@@ -6,10 +6,12 @@ every knob in the study, and it is far longer than the code that acts on it.
 import argparse
 from pathlib import Path
 
-from .config import BATCH_SIZE, HIDDEN, ROOT
+from dgm.common.paths import lecture_dir
+
+from .config import BATCH_SIZE, HIDDEN
 from .paths import INTERPOLANTS
 
-DEFAULT_DATASET = ROOT.parent / "lecture_3" / "esm2_example.csv"
+DEFAULT_DATASET = lecture_dir(3) / "esm2_example.csv"
 
 
 def build_parser(description=None):
@@ -20,7 +22,7 @@ def build_parser(description=None):
                         help=f"ESM-2 model tag. (default: esm2_8m)")
     parser.add_argument("--dataset",    type=Path,
                         default=DEFAULT_DATASET,
-                        help="Path to input CSV (sequence,c[,r1,r2]). (default: lecture_3/esm2_example.csv)")
+                        help="Path to input CSV (sequence,c[,r1,r2]). (default: lecture/lecture_3/esm2_example.csv)")
     parser.add_argument("--dataset-tag", default=None,
                         help="Short label for the dataset used in the output dir name. "
                              "Defaults to the CSV filename stem.")

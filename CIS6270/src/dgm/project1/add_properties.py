@@ -26,8 +26,8 @@ Wild-type attributes are written to a sidecar JSON; the soft stability
 constraint is expressed relative to them.
 
 Usage:
-  python add_properties.py --csv data/avgfp_train.csv --reference data/avgfp_wt.txt
-  python add_properties.py --csv data/avgfp_train.csv --reference data/avgfp_wt.txt \
+  dgm-add-properties --csv data/avgfp_train.csv --reference data/avgfp_wt.txt
+  dgm-add-properties --csv data/avgfp_train.csv --reference data/avgfp_wt.txt \
       --objective unsat_hbond --out data/avgfp_train_unsat.csv
 """
 import argparse
@@ -37,9 +37,11 @@ from pathlib import Path
 
 import numpy as np
 
-import embedding_oracle as eo
+from dgm.project1 import embedding_oracle as eo
 
-ROOT = Path(__file__).resolve().parent
+from dgm.common.paths import project_dir
+
+ROOT = project_dir()
 
 
 def parse_args():

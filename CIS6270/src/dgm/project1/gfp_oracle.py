@@ -7,11 +7,11 @@ prepare_gfp.py, which is disjoint from the generator's training variants, so
 oracle scores of generated sequences are not self-evaluation.
 
 Usage:
-  python gfp_oracle.py --fit                       # fit + report held-out Spearman
-  python gfp_oracle.py --score some.fasta          # score sequences with the saved oracle
+  dgm-gfp-oracle --fit                       # fit + report held-out Spearman
+  dgm-gfp-oracle --score some.fasta          # score sequences with the saved oracle
 
 Import:
-  from gfp_oracle import load_oracle, score_sequences
+  from dgm.project1.gfp_oracle import load_oracle, score_sequences
 """
 import argparse, csv
 from pathlib import Path
@@ -21,7 +21,9 @@ from scipy.sparse import csr_matrix
 from scipy.stats import spearmanr
 from sklearn.linear_model import Ridge
 
-ROOT        = Path(__file__).resolve().parent
+from dgm.common.paths import project_dir
+
+ROOT        = project_dir()
 AMINO_ACIDS = "ACDEFGHIKLMNPQRSTVWY"
 AA_INDEX    = {a: i for i, a in enumerate(AMINO_ACIDS)}
 
@@ -271,7 +273,7 @@ def main():
         for name, path in (("--val", args.val), ("--test", args.test)):
             if path is None or not path.is_file():
                 raise SystemExit(f"{name} is required with --train (got {path}). "
-                                 f"Build the splits with: python split_gfp.py")
+                                 f"Build the splits with: dgm-split-gfp")
         wt = (args.wt or args.train.parent / "avgfp_wt.txt").read_text().strip()
         train, val, test = (read_split(p) for p in (args.train, args.val, args.test))
         print(f"\nFitting the oracle on {len(train[0])} training variants "

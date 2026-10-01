@@ -32,9 +32,9 @@ average per-substitution effect, and its honest accuracy is measured on test.
 Pass --oracle-holdout to carve the oracle its own disjoint slice instead.
 
 Usage:
-  python split_gfp.py
-  python split_gfp.py --test-frac 0.05 --val-frac 0.15 --seed 7
-  python split_gfp.py --stratify-by mutations+class
+  dgm-split-gfp
+  dgm-split-gfp --test-frac 0.05 --val-frac 0.15 --seed 7
+  dgm-split-gfp --stratify-by mutations+class
 """
 import argparse
 import collections
@@ -45,10 +45,12 @@ from pathlib import Path
 
 import numpy as np
 
-from prepare_gfp import CHROMOPHORE, FIELDS, annotate, read_variants, read_wt
+from .prepare_gfp import CHROMOPHORE, FIELDS, annotate, read_variants, read_wt
 
-ROOT = Path(__file__).resolve().parent
-DEFAULT_DATA_ROOT = ROOT.parent.parent / "metl" / "data" / "dms_data"
+from dgm.common.paths import METL_ROOT, project_dir
+
+ROOT = project_dir()
+DEFAULT_DATA_ROOT = METL_ROOT / "data" / "dms_data"
 AMINO_ACIDS = "ACDEFGHIKLMNPQRSTVWY"
 
 
@@ -249,7 +251,7 @@ def main():
     path.write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"  wrote {path.relative_to(ROOT)}")
     print(f"\nNext: fit the oracle on train, select on val, report on test:\n"
-          f"  python gfp_oracle.py --fit --train data/{key}_train.csv "
+          f"  dgm-gfp-oracle --fit --train data/{key}_train.csv "
           f"--val data/{key}_val.csv --test data/{key}_test.csv")
 
 

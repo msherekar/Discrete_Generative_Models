@@ -20,8 +20,8 @@ The modality is detected from the contents of results.pt, so the same command
 works for peptides and for MNIST.
 
 Usage:
-  python analyze_sweep.py --prefix ep --seeds 11 12 13 14 15 --etas 1 5 20 50
-  python analyze_sweep.py --prefix mn --modality image --seeds 11 12 13
+  dgm-analyze-sweep --prefix ep --seeds 11 12 13 14 15 --etas 1 5 20 50
+  dgm-analyze-sweep --prefix mn --modality image --seeds 11 12 13
 """
 import argparse
 import csv
@@ -33,7 +33,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-ROOT = Path(__file__).resolve().parent
+from dgm.common.paths import SHARED_DATA, project_dir
+
+ROOT = project_dir()
 VARIANT_LABEL = {"st": "state-based", "ep": "endpoint", "base": "baseline"}
 COLORS = {"st": "tab:gray", "ep": "tab:blue", "base": "tab:gray"}
 MODES = ("cfg", "single", "multi")
@@ -110,7 +112,7 @@ def main():
     p.add_argument("--seeds", type=int, nargs="+", default=[11, 12, 13, 14, 15])
     p.add_argument("--methods", nargs="+", default=["flow", "diffusion"])
     p.add_argument("--outdir", type=Path, default=None)
-    p.add_argument("--data-dir", type=Path, default=ROOT.parent / "data",
+    p.add_argument("--data-dir", type=Path, default=SHARED_DATA,
                    help="Where MNIST lives, for the real-data fidelity reference")
     p.add_argument("--images", action="store_true",
                    help="Also save a grid of generated images (image modality only)")

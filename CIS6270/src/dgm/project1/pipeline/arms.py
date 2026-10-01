@@ -65,7 +65,7 @@ def _reference_constraint_value(raw_c, reference, prop_names, index) -> float:
     if reference is None:
         return float(raw_c.min())
     try:
-        import embedding_oracle as _eo
+        from .. import embedding_oracle as _eo
         name = prop_names[index]
         attr = _eo.metl_attributes_wt(reference)
         return float(attr[_eo.attribute_index(
