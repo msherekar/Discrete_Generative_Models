@@ -20,7 +20,7 @@ OSDF_RUNS  = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/runs
 OSDF_DATA  = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/data
 
 # Bump on every image rebuild: OSDF caches aggressively by file name.
-IMAGE_VERSION = v2
+IMAGE_VERSION = v3
 
 # ── the run ──────────────────────────────────────────────────────────────────
 # TAG names the output files, so keep it unique per run for the same reason.
