@@ -162,6 +162,10 @@ output = logs/$(TAG).$(ClusterId).$(ProcId).out
 error  = logs/$(TAG).$(ClusterId).$(ProcId).err
 log    = logs/$(TAG).$(ClusterId).log
 
+# WANDB
+OSG_WANDB=1
+
+
 max_retries = 3
 
 queue 1
