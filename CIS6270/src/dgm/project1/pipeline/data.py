@@ -30,7 +30,8 @@ def composition_proxies(sequences):
 # ══════════════════════════════════════════════════════════════════════════════
 
 @torch.no_grad()
-def load_data(csv_path: Path, esm_hf_id: str, cache_dir: Path, max_length: int = 128):
+def load_data(csv_path: Path, esm_hf_id: str, cache_dir: Path,
+              max_length: int = 128, encode_batch: int = None):
     with csv_path.open(newline="") as f:
         rows = list(csv.DictReader(f))
     sequences = [r["sequence"].strip().upper() for r in rows]
@@ -62,9 +63,14 @@ def load_data(csv_path: Path, esm_hf_id: str, cache_dir: Path, max_length: int =
     hidden_size = esm.config.hidden_size
     print(f"  ESM-2 hidden size: {hidden_size}  |  sequences: {len(sequences)}  |  length: {max(lengths)}")
 
+    # The encode pass used the module-level BATCH_SIZE of 16 regardless of
+    # --batch-size, so 41,372 sequences meant 2,586 tiny forward passes and a
+    # CPU-bound phase with the GPU near idle. Every sequence has the same
+    # length, so batching introduces no padding and changes no result.
+    encode_batch = encode_batch or BATCH_SIZE
     encoded = []
-    for start in range(0, len(sequences), BATCH_SIZE):
-        toks = tokenizer(sequences[start:start + BATCH_SIZE], return_tensors="pt")
+    for start in range(0, len(sequences), encode_batch):
+        toks = tokenizer(sequences[start:start + encode_batch], return_tensors="pt")
         toks = {k: v.to(DEVICE) for k, v in toks.items()}
         h = esm.esm(**toks).last_hidden_state
         encoded.append(h[:, 1:-1].cpu())

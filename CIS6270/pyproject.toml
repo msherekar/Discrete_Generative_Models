@@ -37,6 +37,7 @@ dgm-compare-models     = "dgm.project1.compare_models:main"
 dgm-gfp-metrics        = "dgm.project1.gfp_metrics:main"
 dgm-gfp-oracle         = "dgm.project1.gfp_oracle:main"
 dgm-resample-cfg       = "dgm.project1.resample_cfg:main"
+dgm-resample           = "dgm.project1.resample:main"
 dgm-run-mnist          = "dgm.project1.run_mnist:main"
 dgm-prepare-gfp        = "dgm.project1.prepare_gfp:main"
 dgm-split-gfp          = "dgm.project1.split_gfp:main"
@@ -47,6 +48,8 @@ dgm-esm-compare        = "dgm.project1.esm_compare:main"
 dgm-oracle-sweep       = "dgm.project1.oracle_sweep:main"
 dgm-plot-guidance-sweep = "dgm.project1.plot_guidance_sweep:main"
 dgm-wandb              = "dgm.project1.wandb_cli:main"
+dgm-study-plots        = "dgm.project1.study_plots:main"
+dgm-transfer           = "dgm.project1.transfer:main"
 
 [build-system]
 requires = ["hatchling"]

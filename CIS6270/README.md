@@ -269,6 +269,48 @@ python -m dgm.project1.run_experiment --list-models
 Every module listed above has a console script named after it
 (`dgm-evaluate`, `dgm-gfp-metrics`, `dgm-embedding-oracle`, and so on).
 
+### Project-specific figures
+
+Four figures beyond the standard set, each tied to a clause of the project
+brief. The first three run per-run and are produced automatically by OSG jobs;
+the fourth needs both modalities, so it runs after the sweeps.
+
+| Figure | Question | Command |
+| --- | --- | --- |
+| `11_setpoint_calibration` | Does a requested brightness control the achieved one? Plots achieved against requested with a fitted slope. | `dgm-study-plots` |
+| `12_reward_vs_oracle` | Is the gain real, or the reward model's opinion? Rank correlation between the reward head and an independent oracle, against eta. | `dgm-study-plots` |
+| `13_lambda_pareto` | Do brightness and parsimony genuinely compete? Achieved brightness against achieved substitutions across `--reward-lambda`. | `dgm-study-plots` |
+| `14_cross_modality_transfer` | Does the innovation generalize to the second modality? | `dgm-transfer` |
+
+```bash
+dgm-study-plots --run-dir project1_eval/outputs/esm2_8m_long250
+dgm-transfer --protein-prefix ep --image-prefix mn --variants st ep \
+    --etas 1 5 20 50 --seeds 11 12 13 14 15
+```
+
+Each study figure skips itself with a stated reason when a run lacks the arms
+it needs, so running them after every job is safe: calibration needs
+`--setpoint` arms, the Pareto front needs `--reward-lambda`, and the reward
+comparison needs more than one `--reward-eta` to show a trend.
+
+#### Why the transfer figure needs two corrections
+
+Comparing modalities directly would argue the wrong way, for two reasons the
+codebase already documents.
+
+The properties have different units — peptide net charge against mean pixel ink
+— so the y-axis is a standardized effect size, the gain in units of the
+unguided arm's own spread, measured within each seed against that seed's own
+`eta=0` control:
+
+    d = (mean(guided) - mean(unguided)) / sd(unguided)
+
+Nominal eta is not comparable either. `cli.py` explains why: under
+`--normalize-guidance` the reward gradient is a unit vector, so its step is the
+same absolute size at any dimension while the latent norm grows as `sqrt(D)`.
+The x-axis is therefore `eta / sqrt(D)`. The figure shows both axes side by
+side so the rescaling is visible rather than assumed.
+
 ### Experiment tracking
 
 Runs log to Weights & Biases at `proterial/CIS6270`. Nothing in the experiment

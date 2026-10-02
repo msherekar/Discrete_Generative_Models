@@ -145,7 +145,8 @@ def prepare_run(args, parser, model_info, cache_dir) -> RunSetup:
     """Encode the dataset and settle every pre-training choice."""
     print("\nEncoding sequences with ESM-2...")
     dataset, esm, tokenizer, stats, sequences = load_data(
-        args.dataset, model_info["hf_id"], cache_dir, args.max_length
+        args.dataset, model_info["hf_id"], cache_dir, args.max_length,
+        encode_batch=getattr(args, "encode_batch", None) or args.batch_size,
     )
     _, length, dim = dataset.tensors[0].shape
 

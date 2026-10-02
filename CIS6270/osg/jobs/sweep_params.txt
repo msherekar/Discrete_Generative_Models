@@ -1,12 +1,24 @@
-# tag, seed, eta
+# tag, seed, arch, hidden, epochs, batch, interpolant, predict, ema, steps
 #
-# tag must be unique across every line and across past submissions: it names
-# the results.pt in OSDF, and OSDF caches by name, so a reused tag can serve a
-# stale file. Date-stamp or version the prefix when repeating a sweep.
+# Every column here is a TRAINING-time choice: it changes the model, so it needs
+# its own job and pays the full overhead (27 min queue + 21 min image transfer
+# were measured on job 15833630). Anything that only affects sampling --
+# --cfg-weight, --reward-eta, --reward-lambda, --setpoint, --mut-budget,
+# --decode-temperature -- belongs in BASE_ARGS inside sweep.sub, where each
+# extra value costs one sampling pass and no new job. Each job below already
+# samples 4 cfg weights x 2 etas x 3 lambdas x 3 setpoints.
 #
-# These four arms cross two seeds with two reward strengths. The fixed flags
-# are in BASE_ARGS inside sweep.sub.
-e30_s11,  11,  30
-e30_s12,  12,  30
-e100_s11, 11,  100
-e100_s12, 12,  100
+# tag must be unique here and across past submissions: it names the OSDF folder,
+# and OSDF caches by path, so a reused tag can serve a stale file. Date-stamp
+# the prefix when repeating a sweep, and run ../bin/prep_run.sh on every tag
+# before submitting.
+#
+# Two seeds of the baseline, then one job per innovation axis.
+base_s11_20261002,    11, transformer, 256, 125, 128, linear,    eps, 0,     200
+base_s12_20261002,    12, transformer, 256, 125, 128, linear,    eps, 0,     200
+ema_s11_20261002,     11, transformer, 256, 125, 128, linear,    eps, 0.999, 200
+x0_s11_20261002,      11, transformer, 256, 125, 128, linear,    x0,  0,     200
+trig_s11_20261002,    11, transformer, 256, 125, 128, trig,      eps, 0,     200
+quad_s11_20261002,    11, transformer, 256, 125, 128, quadratic, eps, 0,     200
+wide_s11_20261002,    11, transformer, 512, 125, 128, linear,    eps, 0,     200
+mlp_s11_20261002,     11, mlp,         256, 125, 128, linear,    eps, 0,     200

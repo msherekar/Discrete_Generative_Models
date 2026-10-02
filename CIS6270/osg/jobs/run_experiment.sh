@@ -18,6 +18,11 @@
 # results.pt is 200-400 MB per modality, which is why it is split out and
 # remapped to OSDF rather than returned to the access point.
 #
+# A heartbeat runs alongside the experiment, printing elapsed time and GPU
+# utilization every OSG_HEARTBEAT_SECONDS (default 300). With stream_output in
+# the submit file, that is what makes the .out file worth tailing: the
+# experiment itself prints only every epochs//4 epochs.
+#
 set -euo pipefail
 
 if [ "$#" -lt 1 ]; then
@@ -118,10 +123,78 @@ if [ "${OSG_WITH_ORACLE:-0}" = "1" ]; then
     ORACLE_FLAG=()
 fi
 
+# run_experiment prints one epoch line every epochs//4 -- on a 250-epoch run
+# that is once every ~62 epochs, which can be hours apart. With stream_output
+# on, that would make a nearly silent .out file. This heartbeat gives the log
+# something to say while training is between those prints.
+heartbeat() {
+    local interval="${OSG_HEARTBEAT_SECONDS:-300}" start=$SECONDS
+    while sleep "$interval"; do
+        local gpu=""
+        if command -v nvidia-smi >/dev/null 2>&1; then
+            # memory.used reads [N/A] on unified-memory parts such as the
+            # GB10, so it is only printed when it is actually a number.
+            gpu=$(nvidia-smi --query-gpu=utilization.gpu,memory.used \
+                    --format=csv,noheader,nounits 2>/dev/null | head -1 \
+                  | awk -F', *' '{printf "  gpu %s%%", $1;
+                                  if ($2 ~ /^[0-9]+$/) printf "  vram %sMiB", $2}')
+        fi
+        echo "[$(date -u +%H:%M:%S)]   alive $(( (SECONDS - start) / 60 ))m$gpu"
+    done
+}
+heartbeat &
+HEARTBEAT=$!
+# Stop it however the script leaves, so a failure does not orphan the loop.
+trap 'kill "$HEARTBEAT" 2>/dev/null || true' EXIT
+
 say "running: $* --outdir $OUT ${ORACLE_FLAG[*]:-}"
 "$PY" -u -m dgm.project1.run_experiment "$@" \
     --outdir "$OUT" "${ORACLE_FLAG[@]:-}"
+
+kill "$HEARTBEAT" 2>/dev/null || true
+trap - EXIT
 say "run finished"
+
+# ── post-run: the avGFP metric table ─────────────────────────────────────────
+# Automates the dgm-gfp-metrics step that otherwise has to be run by hand after
+# every run. Only the indicator oracle runs here: the METL embedding oracle
+# needs pytorch-lightning and a 64 MB checkout this image does not carry, so
+# re-run locally with --embedding-oracle to add that column.
+#
+# dgm-evaluate is deliberately NOT used. It reads the lecture_3 training CSV,
+# which is not staged on the node -- whereas run_experiment --plot reads the
+# run's own --dataset and produces the same figures.
+if [ "${OSG_METRICS:-1}" = "1" ]; then
+    ORACLE_NPZ=""
+    for candidate in "$DGM_ROOT/project1_eval/data"/avgfp_oracle*.npz; do
+        [ -f "$candidate" ] && ORACLE_NPZ="$candidate"
+    done
+    # The --dataset the run was given, so the novelty and reference-cloud
+    # columns compare against the right training set.
+    DATASET=""; prev=""
+    for a in "$@"; do [ "$prev" = "--dataset" ] && DATASET="$a"; prev="$a"; done
+    if [ -z "$ORACLE_NPZ" ]; then
+        say "[skip] no avgfp_oracle*.npz staged; not scoring"
+    else
+        say "scoring with $(basename "$ORACLE_NPZ")"
+        TRAIN_FLAG=()
+        [ -n "$DATASET" ] && TRAIN_FLAG=(--train "$DATASET")
+        "$PY" -u -m dgm.project1.gfp_metrics --run-dir "$OUT" \
+            --oracle "$ORACLE_NPZ" "${TRAIN_FLAG[@]}" \
+            --baseline-n "${OSG_BASELINE_N:-50}" --outdir "$OUT/metrics" \
+            || say "[warn] metrics failed; the run itself is unaffected"
+
+        # The three project-specific figures: setpoint calibration, reward head
+        # against the oracle, and the lambda Pareto front. Each skips itself
+        # with a reason when the run lacks the arms it needs, so this is safe
+        # to run after every job.
+        say "study figures"
+        "$PY" -u -m dgm.project1.study_plots --run-dir "$OUT" \
+            --oracle "$ORACLE_NPZ" --outdir "$OUT/plots/study" \
+            --prefix "$TAG" \
+            || say "[warn] study figures failed; the run itself is unaffected"
+    fi
+fi
 
 # ── optional: W&B, offline ───────────────────────────────────────────────────
 # Opt-in, because the node holds no W&B credentials and an older image may not
@@ -199,12 +272,16 @@ PY
 } > "$MANIFEST"
 say "staged $MANIFEST"
 
-# Everything small, including any --plot figures, which land under
-# project1_eval/plots rather than --outdir.
+# Everything small: FASTA files, the metric table written above, and any
+# --plot figures, which land under project1_eval/plots rather than --outdir.
 PLOTS_REL=""
 if [ -d "$DGM_ROOT/project1_eval/plots" ] && \
    [ -n "$(ls -A "$DGM_ROOT/project1_eval/plots" 2>/dev/null)" ]; then
-    cp -r "$DGM_ROOT/project1_eval/plots" "results/$TAG/plots"
+    # Copy the contents, not the directory: study_plots has already created
+    # results/$TAG/plots, and `cp -r src dest` with an existing dest would
+    # nest it as plots/plots.
+    mkdir -p "results/$TAG/plots"
+    cp -r "$DGM_ROOT/project1_eval/plots/." "results/$TAG/plots/"
     PLOTS_REL="(with plots)"
 fi
 tar -czf "${TAG}.tar.gz" -C "$SCRATCH" "results/$TAG"

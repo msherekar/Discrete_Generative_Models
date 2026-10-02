@@ -1,0 +1,31 @@
+# Fallback image: OSG's PyTorch base, inheriting their torch instead of pinning.
+#
+# Use this if dgm-gpu.def fails to build -- its %test catches an incompatible
+# pin, and the most likely culprit is transformers against a particular torch.
+# The cost is size: this base brings torchvision, torchaudio and a developer
+# toolchain, which is how the first image reached 8.85 GiB and cost 21 minutes
+# of transfer per cold site.
+#
+#   apptainer build --ignore-proot dgm-gpu-osgbase-v1.sif dgm-gpu-osgbase.def
+#
+Bootstrap: docker
+From: hub.opensciencegrid.org/htc/pytorch:2.3.1-cuda11.8
+
+%post
+    set -eu
+    python -m pip install --no-cache-dir --upgrade pip
+    python -m pip install --no-cache-dir \
+        "transformers==4.57.6" "numpy>=1.24" "scipy>=1.10" \
+        "scikit-learn>=1.7.2" "matplotlib>=3.8" "wandb>=0.19"
+
+%environment
+    export HF_HUB_OFFLINE=1
+    export TRANSFORMERS_OFFLINE=1
+    export TOKENIZERS_PARALLELISM=false
+    export MPLBACKEND=Agg
+
+%test
+    python - <<'PY'
+import matplotlib, numpy, scipy, sklearn, torch, transformers, wandb
+print("torch", torch.__version__, "transformers", transformers.__version__)
+PY

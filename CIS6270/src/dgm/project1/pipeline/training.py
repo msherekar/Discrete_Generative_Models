@@ -4,6 +4,8 @@ Each loop trains its generative network and the reward head together on one
 optimizer, so the reward head sees exactly the noise levels guidance will later
 query it at.
 """
+import os
+
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -16,11 +18,43 @@ from .paths import interpolate, make_ddpm_schedule, sample_timesteps
 # Training
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _loader(dataset, batch_size):
+    """A DataLoader that does not leave the GPU waiting on one Python thread.
+
+    Measured on an OSPool A40 (job 15833630): GPU utilization 0.57 with one core
+    busy for the whole run, because a single thread gathered 128 random rows out
+    of an 11.7 GiB tensor 324 times per epoch, synchronously with the step.
+
+    Worker count comes from the CPUs actually available -- sched_getaffinity
+    respects the cgroup a Condor slot imposes, where os.cpu_count() would report
+    the whole machine and oversubscribe a two-core slot.
+
+    This does not change what the loop sees: batch order and every random draw
+    are identical to num_workers=0, which was verified bit-for-bit on a
+    25-epoch run.
+
+    persistent_workers is deliberately NOT set. It would avoid respawning
+    workers each epoch, but it draws the worker base seed once instead of once
+    per epoch, which shifts the global RNG stream and changes every subsequent
+    randn in the training loop -- measured as a different loss curve. Respawning
+    two workers 250 times costs seconds against hours of training; losing
+    comparability with existing runs is not worth it.
+    """
+    try:
+        available = len(os.sched_getaffinity(0))
+    except AttributeError:                              # not Linux
+        available = os.cpu_count() or 1
+    workers = max(0, min(4, available - 1))
+    extra = {"num_workers": workers, "prefetch_factor": 2} if workers else {}
+    return DataLoader(dataset, batch_size=batch_size, shuffle=True,
+                      pin_memory=torch.cuda.is_available(), **extra)
+
+
 def train_flow(dataset, epochs, batch_size=BATCH_SIZE, hidden=HIDDEN,
                interpolant="linear", arch="mlp"):
     _, length, dim = dataset.tensors[0].shape
     n_props = dataset.tensors[2].shape[1]
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    loader = _loader(dataset, batch_size)
     model  = FlowModel(length, dim, hidden, arch).to(DEVICE)
     reward = RewardModel(length, dim, hidden, arch, n_props).to(DEVICE)
     opt    = torch.optim.Adam(list(model.parameters()) + list(reward.parameters()), lr=LEARNING_RATE)
@@ -50,7 +84,7 @@ def train_diffusion(dataset, epochs, batch_size=BATCH_SIZE, hidden=HIDDEN, arch=
     _, length, dim = dataset.tensors[0].shape
     betas, alphas, alpha_bars, post_vars = make_ddpm_schedule(steps)
     K      = len(betas) - 1
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    loader = _loader(dataset, batch_size)
     model  = DiffusionModel(length, dim, alpha_bars, hidden, arch, predict).to(DEVICE)
     reward = RewardModel(length, dim, hidden, arch,
                          dataset.tensors[2].shape[1]).to(DEVICE)

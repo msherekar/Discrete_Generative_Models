@@ -1,41 +1,69 @@
-# Apptainer image for Project 1 on the OSPool.
+# Apptainer image for Project 1 on the OSPool -- built small on purpose.
 #
-# Built on OSG's own PyTorch base, so torch and CUDA are the versions OSG
-# maintains against its GPU fleet rather than the cu130 build pinned in
-# ../pyproject.toml for this laptop's GB10 (sm_121). Those cu130 wheels need
-# driver >= 580, which most OSPool nodes do not have; this base needs only the
-# 11.8 runtime and matches V100 / A100 / A40 / L40S nodes.
+# The previous image was built on OSG's PyTorch base and came to 8.85 GiB. That
+# is the dominant cost of every job: measured on job 15833630 the worker spent
+# 20 min 56 s receiving 9.51 GB before it ran a single step, against 37 min of
+# compute -- 36% of the paid slot time, and paid again at every new site whose
+# OSDF cache is cold. (The same image reached NCSU in ~2 min on a warm cache,
+# so the cost varies but is never nothing.)
 #
-# dgm itself is NOT installed here. The job script puts the transferred source
-# on PYTHONPATH, so editing code needs no image rebuild -- only a dependency
-# change does.
+# This definition installs only what the code imports, pins torch explicitly,
+# and strips the caches and test suites that dominate a PyTorch layer. Expect
+# roughly 2.5-3 GiB.
+#
+# cu124 wheels run on driver >= 550, which covers the A40 / L40 / A100 / V100
+# nodes this work has landed on (the cu130 wheels in ../pyproject.toml need
+# driver >= 580 and are for this laptop's GB10).
+#
+# dgm itself is NOT installed here: the job script puts the transferred source
+# on PYTHONPATH, so a code change needs no rebuild -- only a dependency change
+# does.
 #
 # Build on the access point (the TMPDIR exports and --ignore-proot are OSPool
 # policy, not optional):
 #
 #   mkdir -p $HOME/tmp
 #   export TMPDIR=$HOME/tmp APPTAINER_TMPDIR=$HOME/tmp APPTAINER_CACHEDIR=$HOME/tmp
-#   apptainer build --ignore-proot dgm-gpu-v1.sif dgm-gpu.def
+#   apptainer build --ignore-proot dgm-gpu-v2.sif dgm-gpu.def
+#   cp dgm-gpu-v2.sif /ospool/$AP/data/$USER/containers/
 #
-# Then stage it (OSDF caches by name, so bump v1 -> v2 on every rebuild):
-#
-#   cp dgm-gpu-v1.sif /ospool/$AP/data/$USER/
+# Bump the version on every rebuild and in the submit files: OSDF caches by name.
 #
 Bootstrap: docker
-From: hub.opensciencegrid.org/htc/pytorch:2.3.1-cuda11.8
+From: hub.opensciencegrid.org/htc/rocky:9-cuda-12.6.0
 
 %post
     set -eu
-    python -m pip install --no-cache-dir --upgrade pip
-    # Only what the base lacks. torch/torchvision come from the base image and
-    # are deliberately not reinstalled.
-    python -m pip install --no-cache-dir \
+    dnf install -y --setopt=install_weak_deps=False python3.11 python3.11-pip
+    alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+    dnf clean all && rm -rf /var/cache/dnf /var/cache/yum
+
+    PIP="python3 -m pip install --no-cache-dir"
+    $PIP --upgrade pip
+
+    # torch only -- no torchvision or torchaudio, which the protein path never
+    # imports and which add well over a gigabyte.
+    $PIP --index-url https://download.pytorch.org/whl/cu124 "torch==2.5.1"
+
+    $PIP \
         "transformers==4.57.6" \
         "numpy>=1.24" \
         "scipy>=1.10" \
         "scikit-learn>=1.7.2" \
         "matplotlib>=3.8" \
         "wandb>=0.19"
+
+    # What is left behind after a pip install, and is never executed at runtime.
+    SITE=$(python3 -c "import site; print(site.getsitepackages()[0])")
+    find "$SITE" -type d -name "tests" -prune -exec rm -rf {} + || true
+    find "$SITE" -type d -name "test" -prune -exec rm -rf {} + || true
+    find "$SITE" -type d -name "__pycache__" -prune -exec rm -rf {} + || true
+    find "$SITE" -type d -name "include" -path "*torch*" -prune -exec rm -rf {} + || true
+    rm -rf "$SITE"/torch/test "$SITE"/torch/utils/benchmark || true
+    # Static libraries and headers: build-time only.
+    find "$SITE" -name "*.a" -delete || true
+    find "$SITE" -name "*.pyi" -delete || true
+    rm -rf /root/.cache /tmp/* || true
 
 %environment
     # Weights are pre-staged by the job; never reach for the network mid-run.
@@ -46,7 +74,7 @@ From: hub.opensciencegrid.org/htc/pytorch:2.3.1-cuda11.8
 
 %test
     # Fails the build rather than every job if a pin is incompatible.
-    python - <<'PY'
+    python3 - <<'PY'
 import matplotlib, numpy, scipy, sklearn, torch, transformers, wandb
 print("torch       ", torch.__version__)
 print("transformers", transformers.__version__)

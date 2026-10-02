@@ -242,6 +242,63 @@ cp $R/diffusion_results.pt results/long250_20261001/diffusion/results.pt
 `dgm-resample-cfg` and re-decoding at another mutation budget possible later —
 worth keeping, too big to pile up in `/home`.
 
+## Watching a job while it runs
+
+Two mechanisms, and you need both because they solve different halves.
+
+### The files update live
+
+`stream_output` and `stream_error` default to **False**, which is why `.out`
+and `.err` only appeared when a job finished: HTCondor was holding them on the
+worker and transferring them on exit. Both submit files now set:
+
+```
+stream_output = True
+stream_error  = True
+```
+
+The files are now created at job start and grow as the job writes, so ordinary
+`tail -f` works on the access point:
+
+```bash
+tail -f logs/long250_20261001.*.out
+```
+
+The cost is negligible here — this job prints a few dozen lines over many
+hours, not a stream of data.
+
+### There is now something to watch
+
+Streaming alone would have given you a nearly silent file.
+`run_experiment` prints one epoch line every `epochs // 4`, so a 250-epoch run
+reports at epochs 62, 124, 186 and 250 — hours apart.
+
+`run_experiment.sh` therefore runs a heartbeat alongside the experiment, which
+prints every five minutes:
+
+```
+[22:30:55]   alive 35m  gpu 76%  vram 6204MiB
+  [flow]      epoch   62/250: loss 0.4668
+[22:35:55]   alive 40m  gpu 78%  vram 6204MiB
+```
+
+Tune or silence it with `OSG_HEARTBEAT_SECONDS` in the job environment; it is
+killed however the script exits, including on failure. The `gpu` field is also
+the quickest way to spot the CPU-bound encode phase, where it sits near zero.
+
+### Without changing anything: condor_tail
+
+`condor_tail` reads the live sandbox of a running job and needs no submit-file
+change, so it works on jobs already queued:
+
+```bash
+condor_tail -f -maxbytes 100000 15833608.0      # stdout, follow
+condor_tail -stderr 15833608.0                  # stderr
+```
+
+Note the default is only the last **1024 bytes** — pass `-maxbytes` or you will
+see a single truncated fragment.
+
 ## Weights & Biases
 
 Logging reads `results.pt` rather than instrumenting the training loop, so no
@@ -286,6 +343,195 @@ mode writes locally and the upload happens from the access point.
 
 If `OSG_WANDB=1` is set on an image without wandb, the job logs a warning and
 carries on; the run itself is unaffected.
+
+## Making a long, wide run affordable
+
+Six changes, measured against job 15833630 (A40 at Montana State: 27 min queue,
+21 min image transfer, 37 min compute, GPU 57% busy, one core busy throughout).
+
+### 1. A smaller image
+
+`env/dgm-gpu.def` now builds from `htc/rocky:9-cuda-12.6.0` with explicit torch
+pins, no torchvision or torchaudio, and the caches, test suites, headers and
+static libraries stripped in `%post`. Expect ~2.5-3 GiB against the previous
+8.85 GiB.
+
+That image was 36% of the paid slot time on a cold OSDF cache, and is paid
+again at every new site. `env/dgm-gpu-osgbase.def` keeps the old
+OSG-PyTorch-base route as a fallback if the slim build's `%test` fails.
+
+**Rebuild and bump the version** -- the submit files now reference `v2`:
+
+```bash
+apptainer build --ignore-proot dgm-gpu-v2.sif dgm-gpu.def
+cp dgm-gpu-v2.sif /ospool/ap40/data/$USER/containers/
+```
+
+### 2. Sampling variation inside one job
+
+The flags are now split by what they cost:
+
+| | Flags | Cost of another value |
+| --- | --- | --- |
+| **Training-time** | `--epochs --arch --hidden --batch-size --interpolant --predict --ema --diffusion-steps --seed` | a whole job: ~48 min of queue and transfer |
+| **Sampling-time** | `--cfg-weight --reward-eta --reward-lambda --setpoint --mut-budget --decode-temperature --exact-mutations --anchor-strength` | one sampling pass |
+
+So `RUN_ARGS` carries 4 cfg weights x 2 etas x 3 lambdas x 3 setpoints in a
+single job, and `sweep_params.txt` varies only training-time columns. That is
+where wide parameter coverage comes from cheaply.
+
+### 3. Sampling as its own job
+
+`dgm-resample` samples a finished run again at any arm set, reading the trained
+field out of `results.pt` -- nothing is retrained:
+
+```bash
+dgm-resample --run-dir results/base_s11 --samples 100 \
+    --cfg-weight 0 1 2 4 --reward-eta 30 100 --reward-lambda 0.3 0.5 0.7
+```
+
+Train with a small `--samples`, push `results.pt` to OSDF, then run the heavy
+arm set separately. Twelve arms at 100 samples with `--endpoint-guidance` is
+hours of GPU time; keeping it out of the training job is what keeps the total
+under the 20-hour `"Long"` ceiling, and it lets you add arms next week without
+retraining. (`dgm-resample-cfg` remains, for conditioning weights only.)
+
+### 4. A lower GPU-memory floor
+
+`gpus_minimum_memory` 12G -> 10G. The A40 run used 8,028 MB, matching the
+6.9 GiB measured locally. Matching more nodes is worth it against a 27-minute
+queue.
+
+### 5. A DataLoader that does not stall the GPU
+
+Both training loops now use `num_workers` (from `sched_getaffinity`, so a
+two-core Condor slot is respected) and `pin_memory`. The A40 run had GPU
+utilization 0.57 with exactly one core busy, because a single thread gathered
+128 random rows out of an 11.7 GiB tensor 324 times per epoch, synchronously
+with the step.
+
+`persistent_workers` is deliberately **not** set. It draws the worker base seed
+once instead of once per epoch, which shifts the global RNG stream and changes
+every subsequent `randn` in the loop -- a visibly different loss curve. Without
+it the change is bit-for-bit identical to before, verified on a 25-epoch run.
+
+### 6. Encoding at the batch size you asked for
+
+`load_data` encoded at the module-level `BATCH_SIZE` of 16 regardless of
+`--batch-size`, so 41,372 sequences meant 2,586 tiny ESM passes and a
+CPU-bound phase with the GPU near idle. It now takes `--batch-size`.
+
+Measured on the full 41,372-sequence dataset, same GPU for both:
+
+| encode batch | time |
+| --- | --- |
+| 16 (old) | 162.3 s |
+| 128 (new) | **65.6 s** |
+
+A 2.5x speedup, saving about 97 s per run. Keep that in proportion: on a
+125-epoch run it is under a percent of the total, and it matters most for short
+calibration runs and for the GPU-utilization figure, where the encode phase was
+what dragged the 2-epoch smoke job down to `GPUs usage 0.06`.
+
+Every sequence has the same length, so batching adds no padding: verified
+bitwise identical at 16 and 128.
+
+### What this does not fix
+
+`request_cpus = 2` stays. The A40 run averaged 1.05 cores, but that average
+hides two phases: encoding wants about two, training about one. Two is cheap
+insurance for the encode pass.
+
+## Post-training plots and metrics, automatically
+
+Both steps you used to run by hand now happen on the node, and their output
+comes home in the tarball alongside the FASTA files.
+
+### Figures and metric CSVs
+
+`--plot` is in both submit files' flag sets. It produces 9 figures and 8 metric
+CSVs, including the training-loss curves:
+
+```
+plots/<run_tag>/<run_tag>_00_summary_panel.png
+                _01_training_loss.png          <- the one that was missing
+                _02_composition_proxies.png
+                _03_latent_pca.png
+                _04_aa_composition_heatmap.png
+                _05_polar_residue_distribution.png
+                _06_reward_pareto_scatter.png
+                _07_positional_entropy.png
+                _08_sequence_diversity.png
+                plus one CSV behind each
+```
+
+Add `--ablate` for the two guidance-sweep panels as well, giving 11 and 10. It
+re-samples the trained models, so it costs extra GPU time.
+
+**`dgm-evaluate` is deliberately not used on the node.** It calls
+`load_training_sequences()`, which reads `lecture/lecture_3/esm2_example.csv` —
+not staged on a worker. `run_experiment --plot` reads the run's own `--dataset`
+instead and produces the same figures; that equivalence was checked
+figure-by-figure, pixel for pixel.
+
+### Project-specific study figures
+
+After the metric table the job runs `dgm-study-plots`, writing into
+`<run>/plots/study/`:
+
+```
+plots/study/<tag>_11_setpoint_calibration.png   achieved vs requested, with slope
+plots/study/<tag>_12_reward_vs_oracle.png       reward head vs oracle, per eta
+plots/study/<tag>_13_lambda_pareto.png          brightness vs substitutions
+                                                plus the CSV behind each
+```
+
+Each skips itself with a reason when the run lacks the arms it needs, so no
+configuration is required. The fourth figure, cross-modality transfer, cannot
+run here -- a node holds one modality -- so run `dgm-transfer` on the access
+point once both sweeps exist.
+
+### The avGFP metric table
+
+The job then runs `dgm-gfp-metrics` itself, writing into `<run>/metrics/`:
+
+```
+metrics/<tag>_gfp_summary.csv      the table, including the random-variant control
+metrics/<tag>_gfp_sequences.csv    per-sequence scores
+metrics/<tag>_gfp_brightness.png
+metrics/<tag>_gfp_pareto.png
+```
+
+It picks up whichever `data/avgfp_oracle*.npz` you staged and passes the run's
+own `--dataset` as `--train`, so novelty and the reference cloud compare
+against the right training set. Knobs:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `OSG_METRICS` | `1` | `0` skips the metrics step |
+| `OSG_BASELINE_N` | `50` | random variants per setting for the control |
+
+**Only the indicator oracle runs on the node.** The METL embedding oracle needs
+`pytorch-lightning` and a 64 MB checkout the image does not carry, so the
+`embedding` column is absent. Add it afterwards, locally:
+
+```bash
+dgm-gfp-metrics --run-dir results/long250_20261001 \
+    --oracle project1_eval/data/avgfp_oracle_v2.npz \
+    --embedding-oracle project1_eval/data/avgfp_metl_oracle_v2.npz \
+    --train project1_eval/data/avgfp_train_props.csv --baseline-n 50
+```
+
+### What the tarball now holds
+
+About 1.2 MB, so it still comes straight back to the access point:
+
+```
+results/<tag>/
+  flow/*.fasta  diffusion/*.fasta
+  metrics/      2 figures + 2 CSVs
+  plots/<run_tag>/  9 figures + 8 CSVs  (11 + 10 with --ablate)
+```
 
 ## Scoring
 
@@ -379,6 +625,10 @@ the fix is in the code, not the submit file.
 always created because Condor fails the entire transfer — losing the small
 tarball with it — if a file named in `transfer_output_files` is missing. Read
 the `.err` log for the real failure.
+
+**`.out` is empty while the job runs.** Fixed by `stream_output = True`, now
+set in both submit files — but a job submitted before that change still holds
+its output until exit; use `condor_tail -f -maxbytes 100000 <id>` for those.
 
 **Calibrating runtime.** Time a short run before committing to a sweep:
 

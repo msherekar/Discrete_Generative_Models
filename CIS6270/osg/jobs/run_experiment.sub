@@ -20,34 +20,69 @@ OSDF_RUNS  = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/runs
 OSDF_DATA  = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/data
 
 # Bump on every image rebuild: OSDF caches aggressively by file name.
-IMAGE_VERSION = v1
+IMAGE_VERSION = v2
 
 # ── the run ──────────────────────────────────────────────────────────────────
 # TAG names the output files, so keep it unique per run for the same reason.
 TAG = long250
 
-# The flags, verbatim as they would be typed locally. Condor's quoted arguments
-# form splits on spaces only, so comma-bearing values like 63,64,65 and
-# multi-value flags like --cfg-weight 0 1 2 4 pass through untouched.
-# --outdir and --no-oracle are added by run_experiment.sh; do not set them here.
+# ── the flags ────────────────────────────────────────────────────────────────
+# Split deliberately into two groups, because they cost very differently.
+#
+# TRAINING-TIME flags change the model, so each value needs its own job and
+# pays the full overhead: on job 15833630 that was 27 min of queue plus 21 min
+# of image transfer before any compute. Vary these across jobs, in sweep.sub:
+#   --epochs --arch --hidden --batch-size --interpolant --predict --ema
+#   --diffusion-steps --seed --sample-seed
+#
+# SAMPLING-TIME flags read the same trained field, so extra values cost one
+# more sampling pass each and nothing else. Put as many as you want HERE,
+# inside one job -- this is how to get wide parameter coverage cheaply:
+#   --cfg-weight --reward-eta --reward-lambda --setpoint --mut-budget
+#   --decode-temperature --exact-mutations --restrict-support --anchor-strength
+#
+# Condor's quoted arguments form splits on spaces only, so comma-bearing values
+# like 63,64,65 and multi-value flags like --cfg-weight 0 1 2 4 pass through
+# untouched. --outdir, --no-oracle and the post-run steps are added by
+# run_experiment.sh; do not set them here.
+#
+# Sampling cost scales as arms x samples x steps, and with
+# --endpoint-guidance --normalize-guidance each step adds a backward pass per
+# objective. Twelve arms at 100 samples is hours, not minutes -- see
+# "Calibrating runtime" in ../README.md before trusting a short run's timing.
 RUN_ARGS = --esm-model esm2_8m \
            --dataset data/avgfp_train_props.csv \
            --dataset-tag $(TAG) \
            --max-length 237 \
-           --mut-budget 5 --exact-mutations \
            --reference data/avgfp_wt.txt \
            --restrict-support data/avgfp_oracle_v2.npz \
-           --decode-temperature 0.7 \
-           --freeze-positions 63,64,65 \
            --minimize 2 \
            --constraint-property 3 --constraint-rho 1.0 \
-           --setpoint 50 99 --setpoint-percentile --setpoint-saturation 6 \
            --arch transformer --hidden 256 \
+           --batch-size 128 --epochs 125 \
+           --diffusion-steps 200 \
            --normalize-guidance --endpoint-guidance \
+           --plot \
+           --mut-budget 5 --exact-mutations \
+           --decode-temperature 0.7 \
+           --freeze-positions 63,64,65 \
            --cfg-weight 0 1 2 4 \
            --reward-eta 30 100 \
-           --batch-size 128 --epochs 500 --samples 100 \
-           --diffusion-steps 200
+           --reward-lambda 0.3 0.5 0.7 \
+           --setpoint 50 90 99 --setpoint-percentile --setpoint-saturation 6 \
+           --samples 100
+#
+# --epochs is 125 rather than 250: the 250-epoch config measured over 21 hours
+# on the GB10 and an estimated 17-18 h on an A40, against the 20 h ceiling of
+# +JobDurationCategory "Long". The loss curve shows the second half buys little
+# -- flow 0.3733 at epoch 124 against 0.3156 at 250, diffusion 0.1808 against
+# 0.1663. Raise it only with a measured per-epoch cost in hand.
+#
+# --plot produces 9 figures and 8 metric CSVs on the node, including the
+# training-loss curves, and run_experiment.sh returns them in the tarball along
+# with the metric table and the three study figures. Add --ablate for the two
+# guidance-sweep panels (11 and 10); it re-samples the trained models, so it
+# costs extra GPU time.
 
 # ── container ────────────────────────────────────────────────────────────────
 # container_image takes no quotes, and the .sif must NOT appear under
@@ -97,11 +132,12 @@ request_disk   = 16GB
 # Ruling out older cards avoids matching a node that cannot run them at all.
 # Matched an L40 (Capability 8.9, 45 GB) on the first real run.
 require_gpus        = (Capability >= 7.0)
-# 6.9 GiB measured with torch.cuda.max_memory_reserved(). Condor reported only
-# 1,282 MB for the smoke run, but it samples nvidia-smi periodically and caught
-# the encode phase rather than transformer training -- do not lower this to match
-# that number.
-gpus_minimum_memory = 12G
+# Confirmed 8,028 MB on the A40 run, against 6.9 GiB measured locally with
+# torch.cuda.max_memory_reserved(). 10G leaves headroom and matches more nodes
+# than 12G, which matters: that job waited 27 minutes in the queue.
+# (Condor reported only 1,282 MB for the 2-epoch smoke run -- it samples
+# nvidia-smi periodically and caught the encode phase. Ignore that number.)
+gpus_minimum_memory = 10G
 
 # MEASURED, and important: the full 250-epoch long250 config ran over 21 hours
 # on the GB10 and was still sampling. That exceeds BOTH OSPool categories --
@@ -115,6 +151,13 @@ gpus_minimum_memory = 12G
 +JobDurationCategory = "Long"
 
 # ── logging and retries ──────────────────────────────────────────────────────
+# Stream stdout and stderr back to the access point as the job runs, instead
+# of transferring them only on exit. Default is False, which is why .out and
+# .err appeared only when a job finished. The cost is negligible here: this job
+# prints a few dozen lines over many hours.
+stream_output = True
+stream_error  = True
+
 output = logs/$(TAG).$(ClusterId).$(ProcId).out
 error  = logs/$(TAG).$(ClusterId).$(ProcId).err
 log    = logs/$(TAG).$(ClusterId).log

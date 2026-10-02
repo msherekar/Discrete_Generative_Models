@@ -189,9 +189,23 @@ def train_diffusion(dataset, epochs):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def reward_gradient(reward_model, z, t, lambdas):
+    """Gradient of the lambda-weighted reward, with lambdas zero-padded.
+
+    The padding matches what pipeline.objective.weight_vector already does and
+    documents: "A shorter list is zero-padded, which is what lets the default
+    lambdas=(1, 0) keep working when a third property is present." This copy
+    never got it, so the ablation raised a size mismatch on any CSV with three
+    rN columns -- the add_properties.py layout. Padding is a no-op for the
+    two-column case.
+    """
     with torch.enable_grad():
         state = z.detach().requires_grad_(True)
-        R = (reward_model(state, t) * lambdas).sum(1)
+        rewards = reward_model(state, t)
+        n = rewards.shape[1]
+        lam = lambdas[:n]
+        if lam.numel() < n:
+            lam = torch.cat([lam, lam.new_zeros(n - lam.numel())])
+        R = (rewards * lam).sum(1)
         grad = torch.autograd.grad(R.sum(), state)[0]
     return grad.detach()
 
