@@ -166,9 +166,9 @@ environment = "OSG_WANDB=1 OSG_METRICS=1 OSG_BASELINE_N=50 OSG_HEARTBEAT_SECONDS
 # workers. Raising this to 4 is cheap and worth one A/B against TimeExecute; it
 # matters less on a 250-epoch run, where training rather than encoding dominates.
 request_gpus   = 1
-request_cpus   = 2
+request_cpus   = 4
 request_memory = 48GB
-request_disk   = 16GB
+request_disk   = 48GB
 
 # The image's cu118 wheels cover sm_70 to sm_90: V100, A100, A40, L40S.
 # Ruling out older cards avoids matching a node that cannot run them at all.
