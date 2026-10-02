@@ -9,7 +9,8 @@ from pathlib import Path
 from dgm.common.paths import lecture_dir
 
 from .config import BATCH_SIZE, HIDDEN
-from .paths import INTERPOLANTS
+from .coupling import add_arguments as add_coupling_arguments
+from .paths import add_arguments as add_path_arguments
 
 DEFAULT_DATASET = lecture_dir(3) / "esm2_example.csv"
 
@@ -53,11 +54,16 @@ def build_parser(description=None):
                              "self-attention layers over residues with learned positional "
                              "embeddings, weights shared across positions. With --arch "
                              "transformer, --hidden sets d_model (try 256).")
-    parser.add_argument("--interpolant", default="linear", choices=INTERPOLANTS,
-                        help="Probability path between prior and data (default: linear). "
-                             "quadratic leaves the prior slowly and accelerates; trig "
-                             "follows a curved, covariance-preserving path. Lecture 2.2 "
-                             "suggests changing this when velocities are hard to learn.")
+    add_path_arguments(parser)
+    parser.add_argument("--steps", type=int, default=200, metavar="N",
+                        help="Euler steps for the flow sampler (default: 200, the "
+                             "value hardcoded before this flag existed). This is the "
+                             "axis a coupling claim is made on: an independent "
+                             "coupling and an OT coupling reach the same marginal "
+                             "given enough steps, and differ in how few steps they "
+                             "need. Sweep 200 50 20 10 and report quality against "
+                             "step count, not quality at 200.")
+    add_coupling_arguments(parser)
     parser.add_argument("--guidance-clip", type=float, default=0.0, metavar="C",
                         help="Bound the per-sample reward-gradient norm at C "
                              "(default: 0 = no clipping). Lecture 3.4: 'Clip unusually "

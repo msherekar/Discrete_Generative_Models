@@ -23,7 +23,7 @@ def _plot_payload(latents, model, reward, setup, min_polar) -> dict:
     }
 
 
-def generate_plots(args, setup, flow, diff, run_tag):
+def generate_plots(args, setup, flow, diff, run_tag, path=None):
     """Write every evaluation figure and raw metric CSV for a finished run.
 
     `flow` and `diff` are (latents, model, reward, losses) per modality; `diff`
@@ -81,7 +81,7 @@ def generate_plots(args, setup, flow, diff, run_tag):
         plot_guidance_ablation(
             flow_model, flow_reward, diff_model, diff_reward, schedule,
             setup.stats, setup.stats,   # same stats for both (shared encoding)
-            plot_dir, prefix,
+            plot_dir, prefix, path=path, steps=args.steps,
         )
 
     n_png = len(list(plot_dir.glob("*.png")))

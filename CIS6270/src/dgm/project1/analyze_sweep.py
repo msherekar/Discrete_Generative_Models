@@ -109,6 +109,15 @@ def main():
     p.add_argument("--outputs", type=Path, default=ROOT / "outputs")
     p.add_argument("--variants", nargs="+", default=["st", "ep"])
     p.add_argument("--etas", type=float, nargs="+", default=[1, 5, 20, 50])
+    p.add_argument("--x-axis", default="eta", choices=("eta", "steps"),
+                   help="What the run-directory level means and what the figure "
+                        "plots against (default: eta). 'steps' is the axis a "
+                        "coupling claim lives on: couplings reach the same "
+                        "marginal given enough integration steps and differ in "
+                        "how few they need, so quality at a fixed 200 steps is "
+                        "the one measurement that cannot show the effect.")
+    p.add_argument("--steps", type=int, nargs="+", default=[10, 20, 50, 200],
+                   help="Integration-step levels, used when --x-axis steps.")
     p.add_argument("--seeds", type=int, nargs="+", default=[11, 12, 13, 14, 15])
     p.add_argument("--methods", nargs="+", default=["flow", "diffusion"])
     p.add_argument("--outdir", type=Path, default=None)
@@ -123,10 +132,17 @@ def main():
     def fmt_eta(e):
         return str(int(e)) if float(e).is_integer() else str(e)
 
+    # One level list drives the directory names, the table and the x axis, so a
+    # second axis costs a name and a label rather than a parallel code path.
+    levels = [float(v) for v in
+              (args.steps if args.x_axis == "steps" else args.etas)]
+    x_label = ("integration steps" if args.x_axis == "steps"
+               else "guidance strength eta")
+
     rows, modality, missing = [], None, []
     for method in args.methods:
         for v in args.variants:
-            for e in args.etas:
+            for e in levels:
                 for s in args.seeds:
                     d = args.outputs / f"{args.prefix}_{v}_{fmt_eta(e)}_s{s}"
                     loaded = load_run(d, method)
@@ -136,7 +152,8 @@ def main():
                     props, losses, modality = loaded
                     if "cfg" not in props or "single" not in props:
                         continue
-                    row = {"method": method, "variant": v, "eta": e, "seed": s,
+                    row = {"method": method, "variant": v, "eta": e,
+                           "level": e, "x_axis": args.x_axis, "seed": s,
                            "gain": props["single"].mean() - props["cfg"].mean(),
                            "unguided": props["cfg"].mean(),
                            "guided": props["single"].mean(),
@@ -149,7 +166,7 @@ def main():
     if not rows:
         raise SystemExit(f"No runs found under {args.outputs} with prefix "
                          f"'{args.prefix}'. Checked e.g. "
-                         f"{args.prefix}_{args.variants[0]}_{fmt_eta(args.etas[0])}"
+                         f"{args.prefix}_{args.variants[0]}_{fmt_eta(levels[0])}"
                          f"_s{args.seeds[0]}")
     if missing:
         print(f"  {len(missing)} run(s) missing, e.g. {missing[0]}")
@@ -159,10 +176,10 @@ def main():
                              squeeze=False)
     for ax, method in zip(axes[0], args.methods):
         print(f"\n=== {method} ({modality}) ===")
-        head = f"{'eta':>7}  " + "  ".join(f"{VARIANT_LABEL.get(v, v):>24}"
+        head = f"{args.x_axis:>7}  " + "  ".join(f"{VARIANT_LABEL.get(v, v):>24}"
                                                 for v in args.variants)
         print(head + "\n" + "-" * len(head))
-        for e in args.etas:
+        for e in levels:
             line = f"{fmt_eta(e):>7}  "
             for v in args.variants:
                 g = [r["gain"] for r in rows
@@ -172,19 +189,19 @@ def main():
             print(line)
         for v in args.variants:
             pts = [mean_ci([r["gain"] for r in rows if r["method"] == method
-                            and r["variant"] == v and r["eta"] == e]) for e in args.etas]
-            ax.errorbar(args.etas, [x[0] for x in pts], yerr=[x[1] for x in pts],
+                            and r["variant"] == v and r["eta"] == e]) for e in levels]
+            ax.errorbar(levels, [x[0] for x in pts], yerr=[x[1] for x in pts],
                         marker="o", capsize=4, color=COLORS.get(v),
                         label=VARIANT_LABEL.get(v, v))
         ax.axhline(0, color="k", lw=0.8, ls=":")
-        if min(args.etas) > 0:
+        if min(levels) > 0:
             ax.set_xscale("log")
-        ax.set_xlabel("guidance strength eta")
+        ax.set_xlabel(x_label)
         ax.set_ylabel(f"guidance gain in {label}")
         ax.set_title(f"{method}: {len(args.seeds)} seeds, 95% interval")
         ax.legend()
     fig.tight_layout()
-    fig.savefig(outdir / f"{args.prefix}_gain_vs_eta.png", dpi=150)
+    fig.savefig(outdir / f"{args.prefix}_gain_vs_{args.x_axis}.png", dpi=150)
     plt.close(fig)
 
     if modality == "image":
@@ -196,7 +213,7 @@ def main():
         print("-" * 69)
         for method in args.methods:
             for v in args.variants:
-                for e in args.etas:
+                for e in levels:
                     sel = [r for r in rows if r["method"] == method
                            and r["variant"] == v and r["eta"] == e]
                     if not sel:
@@ -214,7 +231,7 @@ def main():
         for method in args.methods:
             for v in args.variants:
                 xs, ys = [], []
-                for e in args.etas:
+                for e in levels:
                     sel = [r for r in rows if r["method"] == method
                            and r["variant"] == v and r["eta"] == e]
                     if sel:
@@ -242,7 +259,7 @@ def main():
 
     if args.images and modality == "image":
         d = args.outputs / (f"{args.prefix}_{args.variants[-1]}_"
-                            f"{fmt_eta(args.etas[-1])}_s{args.seeds[0]}")
+                            f"{fmt_eta(levels[-1])}_s{args.seeds[0]}")
         saved = torch.load(d / "results.pt", weights_only=False, map_location="cpu")
         fig, axes = plt.subplots(len(args.methods), len(MODES),
                                  figsize=(3.2 * len(MODES), 3.4 * len(args.methods)),
@@ -254,12 +271,12 @@ def main():
                 axes[i][j].imshow(grid.clamp(-1, 1), cmap="gray", vmin=-1, vmax=1)
                 axes[i][j].set_title(f"{method} / {mode}")
                 axes[i][j].axis("off")
-        fig.suptitle(f"generated samples, eta={fmt_eta(args.etas[-1])}")
+        fig.suptitle(f"generated samples, {args.x_axis}={fmt_eta(levels[-1])}")
         fig.tight_layout()
         fig.savefig(outdir / f"{args.prefix}_samples.png", dpi=150)
         plt.close(fig)
 
-    print(f"\nWrote {outdir}/{args.prefix}_gain_vs_eta.png")
+    print(f"\nWrote {outdir}/{args.prefix}_gain_vs_{args.x_axis}.png")
     print(f"      {outdir}/{args.prefix}_sweep.csv")
 
 

@@ -187,71 +187,21 @@ def train_diffusion(dataset, epochs):
 # ══════════════════════════════════════════════════════════════════════════════
 # Sampling helpers (for ablation)
 # ══════════════════════════════════════════════════════════════════════════════
-
-def reward_gradient(reward_model, z, t, lambdas):
-    """Gradient of the lambda-weighted reward, with lambdas zero-padded.
-
-    The padding matches what pipeline.objective.weight_vector already does and
-    documents: "A shorter list is zero-padded, which is what lets the default
-    lambdas=(1, 0) keep working when a third property is present." This copy
-    never got it, so the ablation raised a size mismatch on any CSV with three
-    rN columns -- the add_properties.py layout. Padding is a no-op for the
-    two-column case.
-    """
-    with torch.enable_grad():
-        state = z.detach().requires_grad_(True)
-        rewards = reward_model(state, t)
-        n = rewards.shape[1]
-        lam = lambdas[:n]
-        if lam.numel() < n:
-            lam = torch.cat([lam, lam.new_zeros(n - lam.numel())])
-        R = (rewards * lam).sum(1)
-        grad = torch.autograd.grad(R.sum(), state)[0]
-    return grad.detach()
-
-
-@torch.no_grad()
-def sample_flow(model, reward_model, n=8, c=1, w=0.0, eta=0.0, lambdas=(1., 0.), steps=200):
-    lam = torch.tensor(lambdas, dtype=torch.float32, device=DEVICE)
-    lam = lam / lam.sum()
-    torch.manual_seed(123)
-    z    = torch.randn(n, model.length, model.dim, device=DEVICE)
-    null = torch.full((n,), 2, dtype=torch.long, device=DEVICE)
-    cond = torch.full((n,), c, dtype=torch.long, device=DEVICE)
-    dt   = 1.0 / steps
-    for step in range(steps):
-        t = torch.full((n,), step * dt, device=DEVICE)
-        v = model(z, t, null)
-        if w:
-            v = v + w * (model(z, t, cond) - model(z, t, null))
-        if eta:
-            kappa = eta * 4 * t[:, None, None] * (1 - t[:, None, None])
-            v = v + kappa * reward_gradient(reward_model, z, t, lam)
-        z = z + dt * v
-    return z
-
-
-@torch.no_grad()
-def sample_diffusion(model, reward_model, alpha_bars, betas, alphas, post_vars,
-                     n=8, c=1, w=0.0, eta=0.0, lambdas=(1., 0.)):
-    lam = torch.tensor(lambdas, dtype=torch.float32, device=DEVICE)
-    lam = lam / lam.sum()
-    K = len(betas) - 1
-    torch.manual_seed(123)
-    z    = torch.randn(n, model.length, model.dim, device=DEVICE)
-    null = torch.full((n,), 2, dtype=torch.long, device=DEVICE)
-    cond = torch.full((n,), c, dtype=torch.long, device=DEVICE)
-    for k in range(K, 0, -1):
-        t = torch.full((n,), k / K, device=DEVICE)
-        eps = model(z, t, null)
-        if w:
-            eps = eps + w * (model(z, t, cond) - model(z, t, null))
-        sigma = (1 - alpha_bars[k]).sqrt()
-        if eta:
-            eps = eps - eta * sigma * reward_gradient(reward_model, z, t, lam)
-        mean = (z - betas[k] * eps / sigma) / alphas[k].sqrt()
-        z    = mean + post_vars[k].sqrt() * torch.randn_like(z) if k > 1 else mean
-    return z
+#
+# Re-exported from pipeline/, not copied. The NETWORK definitions above are
+# deliberately frozen -- that is this module's whole purpose, reading a run
+# produced by an older run_experiment.py without inheriting whatever its
+# networks have since become -- but a sampler is not a network. It only calls
+# model(z, t, c), so the current one drives either generation of network, and it
+# is the only one that knows about the probability path and the coupling.
+#
+# The copy that used to live here took no `interpolant` argument at all, so the
+# ablation integrated a straight linear path whatever the run was trained on,
+# and silently described a model that did not exist. With the path factored into
+# a geometry and a schedule there would now be three such arguments to keep in
+# step, which is two more than a duplicate can survive.
+from ..pipeline.guidance import reward_gradient                  # noqa: F401,E402
+from ..pipeline.sampling import sample_diffusion, sample_flow    # noqa: F401,E402
 
 
 def predict_reward(reward_model, z, stats):

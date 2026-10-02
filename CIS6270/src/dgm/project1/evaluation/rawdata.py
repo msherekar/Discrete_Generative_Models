@@ -3,6 +3,7 @@
 The plots are a view of these tables, not the other way round: whatever a
 figure shows can be recomputed or replotted from the CSVs alone.
 """
+import random
 from collections import Counter
 from pathlib import Path
 from itertools import combinations
@@ -13,6 +14,10 @@ from .loaders import composition_proxies
 from .metrics import _hamming, _positional_entropy
 from .output import _write_csv
 from .style import AMINO_ACIDS, GUIDANCE_MODES, POLAR_RESIDUES
+
+# Pairwise Hamming is quadratic, so the training set is subsampled to this many
+# sequences: 500 gives 124,750 pairs, enough to characterise a distribution.
+TRAIN_PAIR_SEQUENCES = 500
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Raw-data export  (one CSV per metric — load later for custom plots)
@@ -139,7 +144,27 @@ def save_raw_data(flow_data, diff_data, train_seqs, out_dir, prefix,
                     "seq_i": i, "seq_j": j,
                     "hamming": _hamming(s1, s2),
                 })
-    for (i, s1), (j, s2) in combinations(enumerate(train_seqs), 2):
+    # The training set is enumerated pairwise too, and that is quadratic: the
+    # 64-sequence lecture set is 2,016 pairs, but avgfp_train_props.csv is
+    # 41,372 sequences -- 855,800,506 pairs, about 170 GB of dicts. A job that
+    # reached here was killed for exceeding request_memory after sampling had
+    # already finished.
+    #
+    # A random subsample of sequences answers the same question: this column
+    # exists to show where the generated groups sit against the training
+    # spread, and that distribution is estimated, not enumerated. The sampled
+    # sequences are recorded by their original index so a row still points at a
+    # real pair, and the seed is fixed so the figure is reproducible.
+    cap = TRAIN_PAIR_SEQUENCES
+    if len(train_seqs) > cap:
+        picked = sorted(random.Random(0).sample(range(len(train_seqs)), cap))
+        print(f"  [note] pairwise Hamming over {cap} of {len(train_seqs)} "
+              f"training sequences ({cap * (cap - 1) // 2:,} pairs); "
+              f"enumerating all of them would be "
+              f"{len(train_seqs) * (len(train_seqs) - 1) // 2:,}")
+    else:
+        picked = range(len(train_seqs))
+    for (i, s1), (j, s2) in combinations(((k, train_seqs[k]) for k in picked), 2):
         rows.append({
             "method": "training", "guidance_mode": "train",
             "seq_i": i, "seq_j": j, "hamming": _hamming(s1, s2),

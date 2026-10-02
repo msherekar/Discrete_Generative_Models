@@ -59,7 +59,10 @@ def describe_run(args, model_info, dataset_tag, run_tag, out_root):
           + ("  normalized" if args.normalize_guidance else "")
           + ("  endpoint" if args.endpoint_guidance else ""))
     print(f"  Batch size  : {args.batch_size}   hidden width: {args.hidden}")
-    print(f"  Interpolant : {args.interpolant}   architecture: {args.arch}")
+    # The path itself is printed once resolved, in run_experiment: a data-arc
+    # geometry measures its scale from the encoded data, which is not loaded yet.
+    print(f"  Architecture: {args.arch}   coupling: {args.coupling}"
+          + (f" beta={args.coupling_beta}" if args.coupling == "aux" else ""))
     print(f"  Seed        : {args.seed} (train)  {args.sample_seed} (sampling)")
     print(f"  Diffusion   : predict={args.predict}  K={args.diffusion_steps}"
           + (f"  ema={args.ema}" if args.ema else "")

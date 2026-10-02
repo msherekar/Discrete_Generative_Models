@@ -25,6 +25,10 @@ PREFIX="${PREFIX:-ep}"                   # run-name prefix; keep distinct per st
 PY="${PY:-../.venv/bin/python}"          # dgm is installed here by `uv sync`
 SEEDS="${SEEDS:-11 12 13 14 15}"
 ETAS="${ETAS:-1 5 20 50}"
+AXIS="${AXIS:-eta}"                     # eta | steps
+STEPS="${STEPS:-10 20 50 200}"           # levels when AXIS=steps
+FIXED_ETA="${FIXED_ETA:-0}"              # guidance strength held fixed then
+BETA="${BETA:-1.0}"                      # --coupling-beta for the c2/d variants
 VARIANTS="${VARIANTS:-st ep}"            # st = state-based, ep = endpoint guidance
 EPOCHS="${EPOCHS:-200}"
 SAMPLES="${SAMPLES:-100}"
@@ -52,7 +56,7 @@ say "sweep starting"
 echo "  modality : $MODALITY  (runner: $RUNNER)"
 echo "  prefix   : $PREFIX"
 echo "  seeds    : $SEEDS"
-echo "  etas     : $ETAS"
+echo "  axis     : $AXIS  (levels: $([ "$AXIS" = steps ] && echo "$STEPS" || echo "$ETAS"))"
 echo "  variants : $VARIANTS"
 echo "  epochs   : $EPOCHS   samples: $SAMPLES"
 echo "  extra    : ${EXTRA:-<none>}"
@@ -66,29 +70,59 @@ fail=0
 "$PY" -c "import dgm.project1.analyze_sweep" 2>/dev/null \
   || { echo "  MISSING dgm.project1.analyze_sweep"; fail=1; }
 [ $fail -eq 0 ] || { say "preflight failed, nothing run"; exit 1; }
-n_runs=$(( $(wc -w <<<"$SEEDS") * $(wc -w <<<"$ETAS") * $(wc -w <<<"$VARIANTS") ))
+[ "$AXIS" = "steps" ] && LEVELS="$STEPS" || LEVELS="$ETAS"
+n_runs=$(( $(wc -w <<<"$SEEDS") * $(wc -w <<<"$LEVELS") * $(wc -w <<<"$VARIANTS") ))
 echo "  preflight OK -- $n_runs run(s) planned"
 
 # A variant is just a flag set; add cases here to extend the study.
+# base/ot/c1/c2/d are the coupling study: see src/dgm/project1/pipeline/coupling.py.
 variant_flags() {
   case "$1" in
     st)   echo "" ;;                       # state-based guidance (the default)
     ep)   echo "--endpoint-guidance" ;;
+    base) echo "--coupling independent" ;; # the control every coupling is read against
+    ot)   echo "--coupling ot" ;;                                  # option B
+    c1)   echo "--coupling informed" ;;                            # option C1
+    c2)   echo "--coupling aux --coupling-beta ${BETA:-1.0}" ;;     # option C2
+    d)    echo "--coupling aux --coupling-beta ${BETA:-1.0} --coupling-columns 1" ;;
+    # The interpolant study: a geometry, a training schedule and a sampling grid
+    # are three independent choices, so they get three independent variants.
+    seg)   echo "--path-geometry segment" ;;          # the straight-line control
+    arc)   echo "--path-geometry arc" ;;              # variance-preserving at sd 1
+    darc)  echo "--path-geometry data-arc" ;;         # corrected for the data's sd
+    tquad) echo "--time-schedule quadratic" ;;        # training weighting only
+    tcos)  echo "--time-schedule cosine" ;;
+    gquad) echo "--sample-schedule quadratic" ;;      # step placement only
+    gcos)  echo "--sample-schedule cosine" ;;
+    arcq)  echo "--path-geometry arc --time-schedule quadratic" ;;  # was unreachable
     *)    echo "" ;;
   esac
 }
 
+# AXIS=eta sweeps guidance strength (the original study); AXIS=steps sweeps
+# integration steps at a fixed eta, which is the axis a coupling claim needs.
+# Either way the level lands in the run-directory name, so analyze_sweep.py
+# reads both layouts with --x-axis.
+level_flag() {
+  if [ "$AXIS" = "steps" ]; then
+    echo "--steps $1 --reward-eta ${FIXED_ETA:-0}"
+  else
+    echo "--reward-eta $1"
+  fi
+}
+
 build_cmd() {
-  local variant="$1" eta="$2" seed="$3" dir="$4"
-  printf '%s -m %s %s --dataset-tag %s --seed %s --sample-seed %s --reward-eta %s --cfg-weight %s --epochs %s --samples %s --outdir %s %s %s' \
-    "$PY" "$RUNNER" "$DATA_ARGS" "$(basename "$dir")" "$seed" "$seed" "$eta" \
+  local variant="$1" level="$2" seed="$3" dir="$4"
+  printf '%s -m %s %s --dataset-tag %s --seed %s --sample-seed %s %s --cfg-weight %s --epochs %s --samples %s --outdir %s %s %s' \
+    "$PY" "$RUNNER" "$DATA_ARGS" "$(basename "$dir")" "$seed" "$seed" \
+    "$(level_flag "$level")" \
     "$CFG_WEIGHT" "$EPOCHS" "$SAMPLES" "$dir" "$(variant_flags "$variant")" "$EXTRA"
 }
 
 # ── sweep ────────────────────────────────────────────────────────────────────
 declare -a FAILED=(); done_n=0; skipped=0
 for seed in $SEEDS; do
-  for eta in $ETAS; do
+  for eta in $LEVELS; do
     for variant in $VARIANTS; do
       dir="outputs/${PREFIX}_${variant}_${eta}_s${seed}"
       # A finished run has results.pt somewhere under its directory.
@@ -115,8 +149,14 @@ say "ran $done_n, skipped $skipped already-complete, failed ${#FAILED[@]}"
 # ── analyze + plot ───────────────────────────────────────────────────────────
 say "analyzing"
 IMAGES_FLAG=""; [ "$MODALITY" = "image" ] && IMAGES_FLAG="--images"
-"$PY" -m dgm.project1.analyze_sweep --prefix "$PREFIX" --variants $VARIANTS \
-     --etas $ETAS --seeds $SEEDS $IMAGES_FLAG || say "analysis FAILED"
+if [ "$AXIS" = "steps" ]; then
+  "$PY" -m dgm.project1.analyze_sweep --prefix "$PREFIX" --variants $VARIANTS \
+       --x-axis steps --steps $STEPS --seeds $SEEDS $IMAGES_FLAG \
+       || say "analysis FAILED"
+else
+  "$PY" -m dgm.project1.analyze_sweep --prefix "$PREFIX" --variants $VARIANTS \
+       --etas $ETAS --seeds $SEEDS $IMAGES_FLAG || say "analysis FAILED"
+fi
 
 say "finished"
 [ ${#FAILED[@]} -eq 0 ] || echo "  failed runs: ${FAILED[*]}"

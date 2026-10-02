@@ -7,7 +7,7 @@ with the samples.
 """
 
 
-def build_run_config(args, setup, spec, oracle_path) -> dict:
+def build_run_config(args, setup, spec, oracle_path, path=None) -> dict:
     """Everything needed to interpret, or reproduce, this run."""
     threshold = spec.constraint_threshold
     return {
@@ -19,6 +19,15 @@ def build_run_config(args, setup, spec, oracle_path) -> dict:
         "decode":          "mut_budget" if args.mut_budget is not None else "min_polar",
         "mut_budgets":     list(setup.budgets) if setup.budgets else None,
         "interpolant":     args.interpolant,
+        "path_geometry":   path.geometry if path else args.path_geometry,
+        "time_schedule":   path.schedule if path else args.time_schedule,
+        "sample_schedule": path.sample_schedule if path else args.sample_schedule,
+        "path_scale":      path.scale if path else args.path_scale,
+        "steps":           args.steps,
+        "coupling":        args.coupling,
+        "coupling_beta":   args.coupling_beta,
+        "coupling_columns": (list(args.coupling_columns)
+                             if args.coupling_columns else None),
         "mut_budget":      setup.primary,
         "decode_temperature": args.decode_temperature,
         "exact_mutations":    args.exact_mutations,

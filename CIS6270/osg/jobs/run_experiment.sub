@@ -58,24 +58,41 @@ RUN_ARGS = --esm-model esm2_8m \
            --minimize 2 \
            --constraint-property 3 --constraint-rho 1.0 \
            --arch transformer --hidden 256 \
-           --batch-size 128 --epochs 125 \
+           --batch-size 128 --epochs 500 \
            --diffusion-steps 200 \
            --normalize-guidance --endpoint-guidance \
+           --guidance-clip 2.0 \
            --plot \
-           --mut-budget 5 --exact-mutations \
+           --mut-budget 10 5 3 \
            --decode-temperature 0.7 \
            --freeze-positions 63,64,65 \
            --cfg-weight 0 1 2 4 \
-           --reward-eta 30 100 \
+           --reward-eta 10 30 60 \
            --reward-lambda 0.3 0.5 0.7 \
            --setpoint 50 90 99 --setpoint-percentile --setpoint-saturation 6 \
            --samples 100
 #
-# --epochs is 125 rather than 250: the 250-epoch config measured over 21 hours
-# on the GB10 and an estimated 17-18 h on an A40, against the 20 h ceiling of
-# +JobDurationCategory "Long". The loss curve shows the second half buys little
-# -- flow 0.3733 at epoch 124 against 0.3156 at 250, diffusion 0.1808 against
-# 0.1663. Raise it only with a measured per-epoch cost in hand.
+# --epochs 500, with require_gpus below bounding which GPUs may take it:
+# measured ~24 s per epoch-unit on an H100 (so ~7.7 h) against ~81 s on an A40
+# (~25.6 h, past the 20 h ceiling). Run ONE job to completion before
+# committing a sweep at this length.
+#
+# --mut-budget 10 5 3 as a CEILING, with --exact-mutations dropped. Fixing the
+# count made the lambda arms degenerate -- cli.py says so, and the 125-epoch
+# run confirmed it: lam0.3, lam0.5 and lam0.7 all decoded to the same first
+# sequence at an identical Hamming 5.0. Three budgets decode the same latents,
+# so the extra two cost a decode each and no sampling. 10 stays inside the
+# oracle's recorded max_mutations of 15. Expect some unmutated reference in the
+# output now; watch the %wt column in the metric table.
+#
+# --guidance-clip 2.0 and --reward-eta 10 30 60 instead of 30 100. At eta=100
+# the setpoint arms lost 10-13 of 100 samples to numerical divergence, latent
+# norms reaching 5,385 against a median of 250. Objective.term_scale returns
+# 2*(setpoint - predicted) clamped to +/- --setpoint-saturation, so at 6 a
+# setpoint arm carries up to 6x the gradient of any other arm under
+# --normalize-guidance. The clip is applied per sample after the weighted sum,
+# so it bounds the far samples while leaving the controller's deceleration near
+# target intact -- which is what lowering --setpoint-saturation would destroy.
 #
 # --plot produces 9 figures and 8 metric CSVs on the node, including the
 # training-loss curves, and run_experiment.sh returns them in the tarball along
@@ -104,7 +121,13 @@ transfer_input_files = dgm-src.tar.gz, inputs.tar.gz, esm-cache.tar.gz
 # The small tarball comes home; the two results.pt files (200-400 MB each) are
 # remapped into OSDF so they never land on the access point.
 should_transfer_files   = YES
-when_to_transfer_output = ON_EXIT
+# ON_EXIT transfers nothing when a job is evicted, which is how job 15833707
+# lost three hours of finished sampling to a memory kill. ON_EXIT_OR_EVICT
+# copies the named output files into the access point's SPOOL at eviction, so
+# they survive -- which is only useful because run_experiment.sh now stages
+# results.pt before anything memory-hungry runs. Condor holds the job if a
+# named file is missing at eviction, hence the empty placeholders.
+when_to_transfer_output = ON_EXIT_OR_EVICT
 transfer_output_files   = $(TAG).tar.gz, $(TAG)_flow_results.pt, $(TAG)_diffusion_results.pt, $(TAG)_manifest.txt
 transfer_output_remaps  = "$(TAG)_flow_results.pt = $(OSDF_RUNS)/$(TAG)/flow_results.pt; $(TAG)_diffusion_results.pt = $(OSDF_RUNS)/$(TAG)/diffusion_results.pt; $(TAG)_manifest.txt = $(OSDF_RUNS)/$(TAG)/manifest.txt"
 
@@ -126,6 +149,10 @@ environment = "OSG_WANDB=1 OSG_METRICS=1 OSG_BASELINE_N=50 OSG_HEARTBEAT_SECONDS
 # ── resources ────────────────────────────────────────────────────────────────
 # CONFIRMED against a real OSPool run on an L40 (job 15833608, NCSU-OSG-CE1):
 #   Memory  usage 24,861 MB of 32,768 requested   <- 16GB would have been killed
+# but that was 12 arms WITHOUT --plot. The 20-arm config with --plot reached
+# 35,369 MB and was killed (job 15833707) by a quadratic pairwise-Hamming loop
+# over all 41,372 training sequences, now subsampled. 48GB carries the fixed
+# version with margin.
 #   Cpus    usage 1.99 of 2                       <- saturated; see the note below
 #   Disk    usage 9.0 GiB of 16 GiB               <- the .sif IS the disk request
 #   GPUs    usage 0.06                            <- 6%: the job is CPU-bound
@@ -140,19 +167,26 @@ environment = "OSG_WANDB=1 OSG_METRICS=1 OSG_BASELINE_N=50 OSG_HEARTBEAT_SECONDS
 # matters less on a 250-epoch run, where training rather than encoding dominates.
 request_gpus   = 1
 request_cpus   = 2
-request_memory = 32GB
+request_memory = 48GB
 request_disk   = 16GB
 
 # The image's cu118 wheels cover sm_70 to sm_90: V100, A100, A40, L40S.
 # Ruling out older cards avoids matching a node that cannot run them at all.
-# Matched an L40 (Capability 8.9, 45 GB) on the first real run.
-require_gpus        = (Capability >= 7.0)
-# Confirmed 8,028 MB on the A40 run, against 6.9 GiB measured locally with
-# torch.cuda.max_memory_reserved(). 10G leaves headroom and matches more nodes
-# than 12G, which matters: that job waited 27 minutes in the queue.
+# Measured per-epoch cost differs by ~3.4x across the GPUs this work landed on:
+# ~24 s per epoch-unit on an H100 (Capability 9.0) against ~81 s on an A40
+# (8.6). At 500 epochs that is 7.7 h against 25.6 h -- the second blows past
+# the 20 h "Long" ceiling and loses the run. So the 8.6 tier is excluded while
+# A100 (8.0), L40 (8.9) and H100 (9.0) are kept; anything below 8.0 is older
+# still. Fewer eligible nodes means a longer queue, which is the price of a
+# predictable runtime. Relax to (Capability >= 7.0) if you drop back to <= 250
+# epochs and would rather have the capacity.
+require_gpus        = (Capability != 8.6 && Capability >= 8.0)
+# 8,028 MB on the A40 (12 arms) and 9,516 MB on the H100 (20 arms). Back to
+# 12G: 10G left only 700 MB of headroom, and a node with exactly 10 GB would
+# have run out.
 # (Condor reported only 1,282 MB for the 2-epoch smoke run -- it samples
 # nvidia-smi periodically and caught the encode phase. Ignore that number.)
-gpus_minimum_memory = 10G
+gpus_minimum_memory = 12G
 
 # MEASURED, and important: the full 250-epoch long250 config ran over 21 hours
 # on the GB10 and was still sampling. That exceeds BOTH OSPool categories --

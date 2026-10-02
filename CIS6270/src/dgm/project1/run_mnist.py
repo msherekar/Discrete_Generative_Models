@@ -34,7 +34,7 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader
 
 from dgm.common.paths import SHARED_DATA, project_dir
 
@@ -44,28 +44,14 @@ from .run_experiment import (          # noqa: E402
     EMA, INTERPOLANTS, endpoint_from_noise, endpoint_from_velocity,
     interpolate, make_ddpm_schedule, reward_gradient, sample_timesteps,
 )
+from .pipeline.paths import (PathSpec, time_grid,   # noqa: E402
+                             add_arguments as add_path_arguments)
+from .pipeline.images import image_properties, load_mnist   # noqa: E402
+from .pipeline.coupling import (add_arguments as add_coupling_arguments,  # noqa: E402
+                                columns_from_args, pair, source_for)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 CONDITION_DROP = 0.2
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Image properties: the analogue of the peptide composition proxies
-# ══════════════════════════════════════════════════════════════════════════════
-
-def image_properties(x):
-    """[B,1,28,28] in [-1,1] -> [B,2] of (mean intensity, mirror symmetry).
-
-    Both are exact functions of the image, like the residue counts on the
-    peptide side, so evaluating a generated sample carries no oracle error.
-    """
-    ink = x.flatten(1).mean(1)
-    mirror = torch.flip(x, dims=[-1])
-    # Correlation with the left-right flip, normalized per image.
-    a = (x - x.flatten(1).mean(1)[:, None, None, None]).flatten(1)
-    b = (mirror - mirror.flatten(1).mean(1)[:, None, None, None]).flatten(1)
-    symmetry = (a * b).sum(1) / (a.norm(dim=1) * b.norm(dim=1)).clamp_min(1e-8)
-    return torch.stack([ink, symmetry], dim=1)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -143,27 +129,6 @@ class ImageReward(nn.Module):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Data
-# ══════════════════════════════════════════════════════════════════════════════
-
-def load_mnist(limit, data_dir):
-    from torchvision import datasets
-    from torchvision.transforms import v2
-    transform = v2.Compose([
-        v2.ToImage(), v2.ToDtype(torch.float32, scale=True),
-        v2.Normalize(mean=(0.5,), std=(0.5,)),
-    ])
-    mnist = datasets.MNIST(root=data_dir, train=True, download=True, transform=transform)
-    n = min(limit, len(mnist))
-    x = torch.stack([mnist[i][0] for i in range(n)])
-    props = image_properties(x)
-    # Binary class from the first property, mirroring the peptide setup.
-    c = (props[:, 0] > props[:, 0].median()).long()
-    mean, std = props.mean(0), props.std(0, correction=0).clamp_min(1e-6)
-    return TensorDataset(x, c, (props - mean) / std), {"mean": mean, "std": std}
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 # Training
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -174,14 +139,20 @@ def train_flow(dataset, args):
     opt = torch.optim.Adam(list(model.parameters()) + list(reward.parameters()),
                            lr=args.lr)
     ema = EMA(model, args.ema) if args.ema > 0 else None
+    path = args.path
+    source = source_for(args.coupling, dataset.tensors[0].to(DEVICE),
+                        dataset.tensors[2].to(DEVICE))
+    columns = columns_from_args(args)
     losses = []
     for epoch in range(args.epochs):
         total = 0.0
         for x1, c, r in loader:
             x1, c, r = x1.to(DEVICE), c.to(DEVICE), r.to(DEVICE)
-            x0 = torch.randn_like(x1)
+            x0 = (source.paired(r) if source is not None else
+                  pair(torch.randn_like(x1), x1, args.coupling,
+                       args.coupling_beta, r, columns))
             t = torch.rand(len(x1), device=DEVICE)
-            xt, target = interpolate(x0, x1, t, args.interpolant)
+            xt, target = interpolate(x0, x1, t, **path.kwargs)
             dropped = c.masked_fill(torch.rand(len(c), device=DEVICE) < CONDITION_DROP, 2)
             loss = F.mse_loss(model(xt, t, dropped), target) + F.mse_loss(reward(xt, t), r)
             opt.zero_grad(set_to_none=True); loss.backward(); opt.step()
@@ -193,7 +164,8 @@ def train_flow(dataset, args):
             print(f"  [flow]      epoch {epoch+1:>4}/{args.epochs}: loss {losses[-1]:.4f}")
     if ema is not None:
         ema.copy_to(model)
-    return model.eval().requires_grad_(False), reward.eval().requires_grad_(False), losses
+    return (model.eval().requires_grad_(False),
+            reward.eval().requires_grad_(False), losses, source)
 
 
 def train_diffusion(dataset, args):
@@ -236,16 +208,21 @@ def train_diffusion(dataset, args):
 # ══════════════════════════════════════════════════════════════════════════════
 
 @torch.no_grad()
-def sample_flow(model, reward_model, args, n, c=1, w=0.0, eta=0.0, lambdas=(1., 0.)):
+def sample_flow(model, reward_model, args, n, c=1, w=0.0, eta=0.0, lambdas=(1., 0.),
+                source=None):
     lam = torch.tensor(lambdas, dtype=torch.float32, device=DEVICE)
     lam = lam / lam.sum()
     torch.manual_seed(args.sample_seed)
-    z = torch.randn(n, 1, 28, 28, device=DEVICE)
+    # An informed-source field was trained away from N(0, I).
+    z = (source.draw(n, DEVICE) if source is not None
+         else torch.randn(n, 1, 28, 28, device=DEVICE))
     null = torch.full((n,), 2, dtype=torch.long, device=DEVICE)
     cond = torch.full((n,), c, dtype=torch.long, device=DEVICE)
-    dt = 1.0 / args.steps
+    path = args.path
+    grid, deltas = time_grid(args.steps, 0.0, path.sample_schedule, DEVICE)
     for step in range(args.steps):
-        t = torch.full((n,), step * dt, device=DEVICE)
+        t  = grid[step].expand(n)
+        dt = deltas[step]
         v = model(z, t, null)
         if w:
             v = v + w * (model(z, t, cond) - model(z, t, null))
@@ -254,8 +231,9 @@ def sample_flow(model, reward_model, args, n, c=1, w=0.0, eta=0.0, lambdas=(1., 
             endpoint = None
             if args.endpoint_guidance:
                 def endpoint(state, _t=t, _null=null):
-                    return endpoint_from_velocity(state, _t, model(state, _t, _null),
-                                                  args.interpolant)
+                    return endpoint_from_velocity(state, _t,
+                                                  model(state, _t, _null),
+                                                  **path.kwargs)
             v = v + kappa * reward_gradient(reward_model, z, t, lam,
                                             args.guidance_clip, args.normalize_guidance,
                                             endpoint)
@@ -319,7 +297,8 @@ def parse_args():
     p.add_argument("--channels", type=int, default=32)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--steps", type=int, default=100, help="Euler steps for flow")
-    p.add_argument("--interpolant", default="linear", choices=INTERPOLANTS)
+    add_path_arguments(p)
+    add_coupling_arguments(p)
     p.add_argument("--cfg-weight", type=float, default=0.0)
     p.add_argument("--reward-eta", type=float, default=0.0)
     p.add_argument("--endpoint-guidance", action="store_true")
@@ -345,7 +324,9 @@ def main():
     print(f"  Guidance    : cfg w={args.cfg_weight}  reward eta={args.reward_eta}"
           + ("  endpoint" if args.endpoint_guidance else "")
           + ("  normalized" if args.normalize_guidance else ""))
-    print(f"  Interpolant : {args.interpolant}   channels: {args.channels}")
+    print(f"  Channels    : {args.channels}   flow steps: {args.steps}")
+    print(f"  Coupling    : {args.coupling}"
+          + (f" beta={args.coupling_beta}" if args.coupling == "aux" else ""))
     print(f"  Diffusion   : predict={args.predict}  K={args.diffusion_steps}"
           + (f"  ema={args.ema}" if args.ema else ""))
     print(f"  Seed        : {args.seed} (train)  {args.sample_seed} (sampling)")
@@ -354,6 +335,9 @@ def main():
     print(f"\nLoading MNIST (up to {args.limit} images)...")
     dataset, stats = load_mnist(args.limit, args.data_dir)
     print(f"  {len(dataset)} images  |  property means {stats['mean'].tolist()}")
+    # Resolved once, here, because 'data-arc' measures its scale from the data.
+    args.path = PathSpec.from_args(args, dataset.tensors[0])
+    print(f"  Path        : {args.path.describe()}")
 
     modes = {"cfg":    dict(c=1, w=args.cfg_weight, eta=0.0,             lambdas=(1., 0.)),
              "single": dict(c=1, w=0.0,             eta=args.reward_eta, lambdas=(1., 0.)),
@@ -362,11 +346,11 @@ def main():
     results = {}
     print("\nTraining flow matching model...")
     torch.manual_seed(args.seed)
-    fm, fr, flosses = train_flow(dataset, args)
+    fm, fr, flosses, fsource = train_flow(dataset, args)
     print("\nSampling (flow)...")
     flow_out = {}
     for name, cfg in modes.items():
-        x = sample_flow(fm, fr, args, args.samples, **cfg)
+        x = sample_flow(fm, fr, args, args.samples, **cfg, source=fsource)
         props = image_properties(x).cpu()
         flow_out[name] = {"images": x.cpu(), "properties": props}
         print(f"  {name:<7} ink {props[:,0].mean():+.4f}   symmetry {props[:,1].mean():+.4f}")

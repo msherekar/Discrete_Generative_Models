@@ -11,8 +11,10 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from .config import BATCH_SIZE, CONDITION_DROP, DEVICE, HIDDEN, LEARNING_RATE
+from .coupling import pair, source_for
 from .nets import EMA, DiffusionModel, FlowModel, RewardModel
-from .paths import interpolate, make_ddpm_schedule, sample_timesteps
+from .paths import (PathSpec, interpolate, make_ddpm_schedule,
+                    sample_timesteps)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Training
@@ -51,21 +53,35 @@ def _loader(dataset, batch_size):
 
 
 def train_flow(dataset, epochs, batch_size=BATCH_SIZE, hidden=HIDDEN,
-               interpolant="linear", arch="mlp"):
+               path=None, arch="mlp", coupling="independent",
+               coupling_beta=0.0, coupling_columns=None):
+    """Train the velocity field and the reward head together.
+
+    `path` is a PathSpec (geometry, schedule, scale); the default straight
+    segment on linear time is what the lectures use. `coupling` selects how each
+    noise draw is paired with a data point; see coupling.py. It returns the fitted InformedSource alongside the model when
+    coupling='informed', because sampling then has to draw from that same source
+    rather than from N(0, I), and None otherwise.
+    """
+    path = path or PathSpec()
     _, length, dim = dataset.tensors[0].shape
     n_props = dataset.tensors[2].shape[1]
     loader = _loader(dataset, batch_size)
     model  = FlowModel(length, dim, hidden, arch).to(DEVICE)
     reward = RewardModel(length, dim, hidden, arch, n_props).to(DEVICE)
     opt    = torch.optim.Adam(list(model.parameters()) + list(reward.parameters()), lr=LEARNING_RATE)
+    source = source_for(coupling, dataset.tensors[0].to(DEVICE),
+                        dataset.tensors[2].to(DEVICE))
     losses = []
     for epoch in range(epochs):
         total = 0.0
         for z1, c, r_tilde in loader:
             z1, c, r_tilde = z1.to(DEVICE), c.to(DEVICE), r_tilde.to(DEVICE)
-            z0 = torch.randn_like(z1)
+            z0 = (source.paired(r_tilde) if source is not None else
+                  pair(torch.randn_like(z1), z1, coupling, coupling_beta,
+                       r_tilde, coupling_columns))
             t  = torch.rand(len(z1), device=DEVICE)
-            zt, target = interpolate(z0, z1, t, interpolant)
+            zt, target = interpolate(z0, z1, t, **path.kwargs)
             dropped = c.masked_fill(torch.rand(len(c), device=DEVICE) < CONDITION_DROP, 2)
             loss = F.mse_loss(model(zt, t, dropped), target) + F.mse_loss(reward(zt, t), r_tilde)
             opt.zero_grad(set_to_none=True); loss.backward(); opt.step()
@@ -76,7 +92,7 @@ def train_flow(dataset, epochs, batch_size=BATCH_SIZE, hidden=HIDDEN,
             print(f"  [flow]      epoch {epoch+1:>4}/{epochs}: loss {avg:.4f}")
     model.eval().requires_grad_(False)
     reward.eval().requires_grad_(False)
-    return model, reward, losses
+    return model, reward, losses, source
 
 
 def train_diffusion(dataset, epochs, batch_size=BATCH_SIZE, hidden=HIDDEN, arch="mlp",

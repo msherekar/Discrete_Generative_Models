@@ -6,7 +6,9 @@ field, so a sweep over arms costs one extra sampling pass each rather than a
 retraining apiece -- which is why they are built here, after training is
 already decided and before any sampling happens.
 """
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Optional
 
 import numpy as np
@@ -55,18 +57,60 @@ def _resolve_setpoints(args, parser, raw_r1) -> list:
     return setpoint_raw
 
 
-def _reference_constraint_value(raw_c, reference, prop_names, index) -> float:
+def _sidecar_value(dataset, reference, name):
+    """The wild-type attribute value from add_properties.py's sidecar JSON.
+
+    add_properties.py writes <dataset>.wt_attributes.json beside the CSV it
+    produces, recording the wild-type sequence and all 55 METL attributes. That
+    file is 3 KB and makes METL unnecessary here.
+
+    This matters beyond convenience. On a worker without METL the old code fell
+    through to the training median, so an OSG run silently constrained against
+    a different reference than the same command run locally -- r3 > +0.172
+    instead of > -0.442 on avgfp_train_props. The sidecar closes that gap.
+
+    Returns None if the file is absent, or if its wild type is not the
+    reference this run is using, in which case its values do not apply.
+    """
+    if dataset is None:
+        return None
+    sidecar = Path(dataset).with_suffix(".wt_attributes.json")
+    if not sidecar.is_file():
+        return None
+    try:
+        saved = json.loads(sidecar.read_text())
+    except (OSError, ValueError):
+        return None
+    if saved.get("wild_type") != reference:
+        print(f"  [note] {sidecar.name} describes a different wild type; "
+              f"not using its attributes")
+        return None
+    wanted = "total_score" if name == "r3" else name
+    names = saved.get("attribute_names") or []
+    values = saved.get("wild_type_attributes") or []
+    if wanted in names and len(values) == len(names):
+        print(f"  Constraint reference from {sidecar.name} "
+              f"({wanted}, no METL needed)")
+        return float(values[names.index(wanted)])
+    return None
+
+
+def _reference_constraint_value(raw_c, reference, prop_names, index,
+                                dataset=None) -> float:
     """The reference sequence's own value of the constrained property.
 
-    Read from METL when a reference exists, so the constraint reads "no less
-    stable than wild type"; otherwise the training median, which is the best
-    available stand-in.
+    Tried in order: add_properties.py's sidecar JSON, then METL live, then the
+    training median. The sidecar is first because it needs no METL checkout and
+    so gives the same answer on a worker node as on a laptop.
     """
     if reference is None:
         return float(raw_c.min())
+    name = prop_names[index]
+    from_sidecar = _sidecar_value(dataset, reference, name)
+    if from_sidecar is not None:
+        return from_sidecar
     try:
         from .. import embedding_oracle as _eo
-        name = prop_names[index]
         attr = _eo.metl_attributes_wt(reference)
         return float(attr[_eo.attribute_index(
             "total_score" if name == "r3" else name)])
@@ -74,7 +118,9 @@ def _reference_constraint_value(raw_c, reference, prop_names, index) -> float:
         fallback = float(np.median(raw_c.numpy()))
         print(f"  [warn] could not read the reference value for "
               f"{prop_names[index]} ({exc}); falling back to "
-              f"the training median {fallback:+.3f}")
+              f"the training median {fallback:+.3f}. Stage "
+              f"<dataset>.wt_attributes.json to avoid this -- it is 3 KB and "
+              f"makes the constraint match a local run.")
         return fallback
 
 
@@ -87,7 +133,8 @@ def _constraint_threshold(args, setup, constraint_index, prop_names):
     raw_c = raw_c * float(stats["r_std"][constraint_index]) \
         + float(stats["r_mean"][constraint_index])
     reference_value = _reference_constraint_value(
-        raw_c, setup.reference, prop_names, constraint_index)
+        raw_c, setup.reference, prop_names, constraint_index,
+        dataset=getattr(args, "dataset", None))
     threshold = Objective.from_raw(
         reference_value + args.constraint_delta, constraint_index, stats)
     print(f"  Constraint reference {prop_names[constraint_index]}="

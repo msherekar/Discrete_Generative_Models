@@ -155,6 +155,26 @@ kill "$HEARTBEAT" 2>/dev/null || true
 trap - EXIT
 say "run finished"
 
+# ── stage the heavy artifacts FIRST ──────────────────────────────────────────
+# Before the metric table, the study figures or anything else that allocates.
+# Job 15833707 was killed for exceeding request_memory AFTER both modalities
+# had finished sampling, and lost everything: transfer_output_files names files
+# that the packaging step had not created yet, so there was nothing to send.
+# Moving results.pt to the scratch root here means an eviction later still has
+# the expensive output sitting where Condor expects it.
+cd "$SCRATCH"
+for method in flow diffusion; do
+    target="${TAG}_${method}_results.pt"
+    if [ -f "results/$TAG/$method/results.pt" ]; then
+        mv "results/$TAG/$method/results.pt" "$target"
+        say "staged $target ($(du -h "$target" | cut -f1))"
+    else
+        : > "$target"
+        say "[warn] no results.pt for $method; staging an empty placeholder"
+    fi
+done
+cd "$DGM_ROOT/project1_eval"
+
 # ── post-run: the avGFP metric table ─────────────────────────────────────────
 # Automates the dgm-gfp-metrics step that otherwise has to be run by hand after
 # every run. Only the indicator oracle runs here: the METL embedding oracle
@@ -221,20 +241,8 @@ cd "$SCRATCH"
 
 # results.pt out to its own uniquely named file per modality: OSDF caches by
 # name, so the tag must make it unique.
-# Both names are always created, even if empty: run_experiment.sub declares
-# them under transfer_output_files, and Condor fails the whole transfer --
-# losing the tarball too -- if a declared file is absent. A zero-byte
-# results.pt therefore means that modality did not finish; check the .err log.
-for method in flow diffusion; do
-    target="${TAG}_${method}_results.pt"
-    if [ -f "results/$TAG/$method/results.pt" ]; then
-        mv "results/$TAG/$method/results.pt" "$target"
-        say "staged $target ($(du -h "$target" | cut -f1))"
-    else
-        : > "$target"
-        say "[warn] no results.pt for $method; staging an empty placeholder"
-    fi
-done
+# results.pt was already staged above, before the memory-hungry steps. A
+# zero-byte one means that modality did not finish; check the .err log.
 
 # A manifest beside the results in OSDF, so a run folder months from now says
 # what it is without needing the tarball: which node, which GPU, which flags.

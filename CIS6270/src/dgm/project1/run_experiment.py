@@ -42,7 +42,7 @@ from .pipeline.nets import (EMA, DiffusionModel, FlowModel, RewardModel,
 from .pipeline.objective import Objective, weight_vector
 from .pipeline.oracle import (decode_all_budgets, load_brightness_oracle,
                              resolve_oracle, score_with_oracle)
-from .pipeline.paths import (INTERPOLANTS, endpoint_from_noise,
+from .pipeline.paths import (INTERPOLANTS, PathSpec, endpoint_from_noise,
                             endpoint_from_velocity, interpolate,
                             make_ddpm_schedule, sample_timesteps)
 from .pipeline.plots import generate_plots
@@ -109,22 +109,26 @@ def main():
                     "seed": args.sample_seed}
     oracle, oracle_path = resolve_oracle(args, setup.length)
     arms       = build_arms(args, parser, spec)
-    run_config = build_run_config(args, setup, spec, oracle_path)
+    path       = PathSpec.from_args(args, setup.dataset.tensors[0])
+    print(f"  Path        : {path.describe()}")
+    run_config = build_run_config(args, setup, spec, oracle_path, path)
     save_args  = (setup.stats, model_info["hf_id"], setup.length, setup.dim,
                   args.min_polar)
 
     # ── Flow matching ─────────────────────────────────────────────────────────
     print("\nTraining flow matching model...")
     torch.manual_seed(args.seed)
-    flow_model, flow_reward, flow_losses = train_flow(
+    columns = ([c - 1 for c in args.coupling_columns]
+               if args.coupling_columns else None)
+    flow_model, flow_reward, flow_losses, flow_source = train_flow(
         setup.dataset, args.epochs, args.batch_size, args.hidden,
-        args.interpolant, args.arch)
+        path, args.arch, args.coupling, args.coupling_beta, columns)
 
     print("\nSampling (flow)...")
     flow_latents = _sample_all(
         lambda **kw: sample_flow(flow_model, flow_reward, **kw),
         arms, setup, oracle, args.samples, guide_kwargs,
-        extra={"interpolant": args.interpolant})
+        extra={"path": path, "steps": args.steps, "source": flow_source})
     save_results(out_root, "flow", flow_latents, flow_model, flow_reward,
                  *save_args, flow_losses, run_config)
 
@@ -156,7 +160,7 @@ def main():
             (flow_latents, flow_model, flow_reward, flow_losses),
             (diff_latents, diff_model, diff_reward, diff_losses,
              (betas, alphas, alpha_bars, post_vars)),
-            run_tag)
+            run_tag, path)
     else:
         print(f"To plot: dgm-evaluate --model-name {args.esm_model} "
               f"--dataset {dataset_tag} "

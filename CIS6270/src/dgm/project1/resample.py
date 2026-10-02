@@ -32,6 +32,22 @@ from . import run_experiment as R
 from .resample_cfg import rebuild_model, rebuild_objective
 
 
+def path_from_config(config):
+    """The PathSpec a saved run was trained with.
+
+    Reads the new keys when present and falls back to the legacy `interpolant`,
+    so a results.pt written before paths.py was factored still re-samples along
+    the path it was actually trained on.
+    """
+    from .pipeline.paths import PathSpec, resolve_path
+    if config.get("path_geometry"):
+        return PathSpec(config["path_geometry"], config.get("time_schedule", "linear"),
+                        config.get("path_scale") or 1.0,
+                        config.get("sample_schedule"))
+    geometry, schedule = resolve_path(config.get("interpolant") or "linear")
+    return PathSpec(geometry, schedule)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -191,8 +207,7 @@ def main():
         for name, cfg in arms.items():
             if method == "flow":
                 z = R.sample_flow(model, reward, n=n, **cfg, **anchor_kwargs,
-                                  **guide,
-                                  interpolant=config.get("interpolant", "linear"))
+                                  **guide, path=path_from_config(config))
             else:
                 betas, alphas, alpha_bars, post_vars = schedule
                 z = R.sample_diffusion(model, reward, alpha_bars, betas, alphas,

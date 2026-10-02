@@ -76,6 +76,16 @@ for f in "${DATA[@]}"; do
     [ -f "$path" ] || { echo "  no such data file: $f" >&2; exit 1; }
     cp "$path" "$STAGE/inputs/"
     echo "  + $(basename "$path")  $(size "$path")"
+    # add_properties.py writes <csv>.wt_attributes.json beside its output. It
+    # holds the wild-type METL attributes, which is what sets the constraint
+    # reference -- 3 KB that saves staging METL itself, and without it a worker
+    # falls back to the training median and constrains against a different
+    # reference than a local run.
+    sidecar="${path%.csv}.wt_attributes.json"
+    if [ "$path" != "$sidecar" ] && [ -f "$sidecar" ]; then
+        cp "$sidecar" "$STAGE/inputs/"
+        echo "  + $(basename "$sidecar")  $(size "$sidecar")   (constraint reference)"
+    fi
 done
 tar -czf "$JOBS/inputs.tar.gz" -C "$STAGE" inputs
 echo "  inputs.tar.gz     $(size "$JOBS/inputs.tar.gz")"

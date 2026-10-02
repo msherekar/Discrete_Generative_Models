@@ -12,8 +12,15 @@ from .output import _save, _write_csv
 from .style import METHOD_COLORS, plt
 
 def plot_guidance_ablation(flow_model, flow_reward, diff_model, diff_reward,
-                            diff_schedule, flow_stats, diff_stats, out_dir, prefix=""):
-    """Vary CFG weight w and reward eta; plot + save predicted r1, r2."""
+                            diff_schedule, flow_stats, diff_stats, out_dir,
+                            prefix="", path=None, steps=200):
+    """Vary CFG weight w and reward eta; plot + save predicted r1, r2.
+
+    `path` is the run's PathSpec. It has to be passed in rather than defaulted:
+    re-sampling a model along a different path than it was trained on produces
+    numbers for a model that does not exist, which is what this figure did
+    before the sampler was shared with pipeline/.
+    """
     betas, alphas, alpha_bars, post_vars = diff_schedule
     out_dir  = Path(out_dir)
 
@@ -30,7 +37,8 @@ def plot_guidance_ablation(flow_model, flow_reward, diff_model, diff_reward,
     cfg_results = {}   # method -> {"means_r1": [...], "stds_r1": [...], ...}
     for method, model, reward, stats, sampler in [
         ("flow",      flow_model,  flow_reward,  flow_stats,
-         lambda m, r, w: sample_flow(m, r, n=8, c=1, w=w, eta=0)),
+         lambda m, r, w: sample_flow(m, r, n=8, c=1, w=w, eta=0,
+                                     path=path, steps=steps)),
         ("diffusion", diff_model, diff_reward, diff_stats,
          lambda m, r, w: sample_diffusion(m, r, alpha_bars, betas, alphas, post_vars,
                                           n=8, c=1, w=w, eta=0)),
@@ -76,7 +84,9 @@ def plot_guidance_ablation(flow_model, flow_reward, diff_model, diff_reward,
     eta_results = {}
     for method, model, reward, stats, sampler in [
         ("flow",      flow_model,  flow_reward,  flow_stats,
-         lambda m, r, e: sample_flow(m, r, n=8, c=1, w=0, eta=e, lambdas=(1., 0.))),
+         lambda m, r, e: sample_flow(m, r, n=8, c=1, w=0, eta=e,
+                                     lambdas=(1., 0.), path=path,
+                                     steps=steps)),
         ("diffusion", diff_model, diff_reward, diff_stats,
          lambda m, r, e: sample_diffusion(m, r, alpha_bars, betas, alphas, post_vars,
                                           n=8, c=1, w=0, eta=e, lambdas=(1., 0.))),
