@@ -17,7 +17,6 @@ OSG_AP   = ap40
 #   OSDF_RUNS   where this run's heavy outputs are written
 OSDF_IMAGE = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/containers
 OSDF_RUNS  = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/runs
-OSDF_DATA  = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/data
 
 # Bump on every image rebuild: OSDF caches aggressively by file name.
 IMAGE_VERSION = v3
@@ -97,7 +96,8 @@ arguments  = "$(TAG) $(RUN_ARGS)"
 # All three sit well under the 1 GB mark above which OSG asks for OSDF:
 # code ~1 MB, this run's data ~13 MB, esm2_8m weights ~30 MB.
 # For esm2_650m (2.5 GB) or bigger, drop esm-cache.tar.gz and use instead:
-#   transfer_input_files = dgm-src.tar.gz, inputs.tar.gz, $(OSDF_DATA)/esm-cache/?recursive
+#   transfer_input_files = dgm-src.tar.gz, inputs.tar.gz, \
+#       osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/data/esm-cache/?recursive
 transfer_input_files = dgm-src.tar.gz, inputs.tar.gz, esm-cache.tar.gz
 
 # ── output ───────────────────────────────────────────────────────────────────
@@ -107,6 +107,21 @@ should_transfer_files   = YES
 when_to_transfer_output = ON_EXIT
 transfer_output_files   = $(TAG).tar.gz, $(TAG)_flow_results.pt, $(TAG)_diffusion_results.pt, $(TAG)_manifest.txt
 transfer_output_remaps  = "$(TAG)_flow_results.pt = $(OSDF_RUNS)/$(TAG)/flow_results.pt; $(TAG)_diffusion_results.pt = $(OSDF_RUNS)/$(TAG)/diffusion_results.pt; $(TAG)_manifest.txt = $(OSDF_RUNS)/$(TAG)/manifest.txt"
+
+# ── environment the job script reads ─────────────────────────────────────────
+# These MUST go through `environment`. A bare `OSG_WANDB = 1` in a submit file
+# defines a Condor macro, not a job environment variable, and condor_submit
+# warns "was unused by condor_submit" -- the job never sees it.
+#
+#   OSG_WANDB              1 = write an offline W&B run into the results dir,
+#                          which the tarball carries home for `wandb sync` on
+#                          the access point. Needs wandb in the image (v2 does).
+#   OSG_METRICS            0 = skip the gfp_metrics table and the study figures
+#   OSG_BASELINE_N         random variants per setting for the control
+#   OSG_HEARTBEAT_SECONDS  how often the "alive" line prints, for tailing .out
+#   OSG_WITH_ORACLE        1 = score inline; needs METL in the image, which it
+#                          is not, so leave at 0 and score afterwards
+environment = "OSG_WANDB=1 OSG_METRICS=1 OSG_BASELINE_N=50 OSG_HEARTBEAT_SECONDS=300 OSG_WITH_ORACLE=0"
 
 # ── resources ────────────────────────────────────────────────────────────────
 # CONFIRMED against a real OSPool run on an L40 (job 15833608, NCSU-OSG-CE1):
@@ -161,9 +176,6 @@ stream_error  = True
 output = logs/$(TAG).$(ClusterId).$(ProcId).out
 error  = logs/$(TAG).$(ClusterId).$(ProcId).err
 log    = logs/$(TAG).$(ClusterId).log
-
-# WANDB
-OSG_WANDB=1
 
 
 max_retries = 3

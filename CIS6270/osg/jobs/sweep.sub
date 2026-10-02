@@ -18,7 +18,6 @@ OSG_AP   = ap40
 #   OSDF_RUNS   where this run's heavy outputs are written
 OSDF_IMAGE = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/containers
 OSDF_RUNS  = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/runs
-OSDF_DATA  = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/data
 IMAGE_VERSION = v2
 
 PARAMS = sweep_params.txt
@@ -71,6 +70,21 @@ transfer_output_remaps  = "$(tag)_flow_results.pt = $(OSDF_RUNS)/$(tag)/flow_res
 # the module-level BATCH_SIZE of 16 in a plain Python loop with no DataLoader
 # workers. Raising this to 4 is cheap and worth one A/B against TimeExecute; it
 # matters less on a 250-epoch run, where training rather than encoding dominates.
+# ── environment the job script reads ─────────────────────────────────────────
+# These MUST go through `environment`. A bare `OSG_WANDB = 1` in a submit file
+# defines a Condor macro, not a job environment variable, and condor_submit
+# warns "was unused by condor_submit" -- the job never sees it.
+#
+#   OSG_WANDB              1 = write an offline W&B run into the results dir,
+#                          which the tarball carries home for `wandb sync` on
+#                          the access point. Needs wandb in the image (v2 does).
+#   OSG_METRICS            0 = skip the gfp_metrics table and the study figures
+#   OSG_BASELINE_N         random variants per setting for the control
+#   OSG_HEARTBEAT_SECONDS  how often the "alive" line prints, for tailing .out
+#   OSG_WITH_ORACLE        1 = score inline; needs METL in the image, which it
+#                          is not, so leave at 0 and score afterwards
+environment = "OSG_WANDB=1 OSG_METRICS=1 OSG_BASELINE_N=50 OSG_HEARTBEAT_SECONDS=300 OSG_WITH_ORACLE=0"
+
 request_gpus   = 1
 request_cpus   = 2
 request_memory = 32GB
