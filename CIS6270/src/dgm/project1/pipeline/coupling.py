@@ -30,7 +30,7 @@ method hyperparameter. check_coupling.py sweeps it for exactly that reason.
 import numpy as np
 import torch
 
-KINDS = ("independent", "ot", "aux", "informed")
+KINDS = ("independent", "ot", "aux", "informed", "informed-shuffled", "scaled")
 
 
 def add_arguments(parser):
@@ -70,18 +70,53 @@ def columns_from_args(args):
             if args.coupling_columns else None)
 
 
+class ScaledSource:
+    """Isotropic noise at the DATA's scale instead of at unit scale.
+
+    The other control the informed source needs, and the one that is easy to
+    overlook. Flow matching conventionally starts from N(0, I), but nothing
+    guarantees the data has unit scale: measured here, peptide ESM latents are
+    standardized and sit at sd 1.000, while MNIST as trained sits at sd 0.614.
+    So on images the usual source is 63% wider than the data it transports to,
+    and the informed source happens to fix that as a side effect -- its own sd
+    came out at 0.614, matching the data exactly.
+
+    This isolates that side effect. No map, no property information, just the
+    right width. If it recovers most of the informed source's benefit on images,
+    then what mattered there was the SCALE and not the information.
+    """
+
+    def __init__(self, scale, shape):
+        self.scale, self.shape = float(scale), shape
+        self.sigma = float(scale)          # for the shared logging line
+
+    def paired(self, aux):
+        return self.scale * torch.randn(len(aux), *self.shape, device=aux.device)
+
+    def draw(self, n, device, aux=None):
+        return self.scale * torch.randn(n, *self.shape, device=device)
+
+
 def source_for(kind, z1, aux):
-    """The fitted InformedSource this coupling needs, or None.
+    """The replacement source this setting needs, or None for a true coupling.
 
     Fitted once on the whole training set rather than per batch: the map is part
     of the model, and refitting per batch would make the source move during
     training.
     """
-    if kind != "informed":
+    if kind == "scaled":
+        source = ScaledSource(float(z1.std()), tuple(z1.shape[1:]))
+        print(f"  [coupling]  isotropic source at the data's scale "
+              f"{source.scale:.4f} (N(0,I) would be 1.0)")
+        return source
+    if kind not in ("informed", "informed-shuffled"):
         return None
     source = InformedSource.fit(z1, aux)
+    source.shuffle = (kind == "informed-shuffled")
     print(f"  [coupling]  informed source fitted, residual sigma "
-          f"{source.sigma:.4f}")
+          f"{source.sigma:.4f}"
+          + ("  [SHUFFLED: property->sample pairing destroyed, "
+             "source marginal unchanged]" if source.shuffle else ""))
     return source
 
 
@@ -186,9 +221,13 @@ class InformedSource:
     and the requested property is an input rather than a guidance term.
     """
 
-    def __init__(self, A, shape, sigma, aux_mean, aux_std):
+    def __init__(self, A, shape, sigma, aux_mean, aux_std, shuffle=False):
         self.A, self.shape, self.sigma = A, shape, float(sigma)
         self.aux_mean, self.aux_std = aux_mean, aux_std
+        # The ablation: keep the map, the residual scale and the source marginal
+        # exactly, and destroy only WHICH property vector belongs to which data
+        # point. See source_for().
+        self.shuffle = bool(shuffle)
 
     @classmethod
     def fit(cls, z1, aux, ridge=1.0):
@@ -203,6 +242,8 @@ class InformedSource:
 
     def paired(self, aux):
         """The source point belonging to these data points (training time)."""
+        if self.shuffle:
+            aux = aux[torch.randperm(len(aux), device=aux.device)]
         X = torch.cat([aux, torch.ones(len(aux), 1, device=aux.device)], dim=1)
         mean = (X @ self.A).reshape(-1, *self.shape)
         return mean + self.sigma * torch.randn_like(mean)

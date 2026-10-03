@@ -66,6 +66,49 @@ def load_run(run_dir, method):
     return None
 
 
+def reference_property(modality, run_dir, method, data_dir, n=2000):
+    """The property distribution a good sampler should reproduce.
+
+    A path or coupling study runs at eta=0, where the guided arm IS the unguided
+    arm, so `gain` is identically zero and measures nothing. What such a study
+    changes is how faithfully the sampler reproduces the DATA at a given step
+    count, which needs the data's own distribution as the reference -- this one.
+
+    Real MNIST ink for images; the training CSV's net charge for peptides, read
+    from the dataset path the run recorded in its own config.
+    """
+    if modality == "image":
+        from torchvision import datasets
+        from torchvision.transforms import v2
+        tf = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True),
+                         v2.Normalize((0.5,), (0.5,))])
+        mnist = datasets.MNIST(root=str(data_dir), train=True, download=True,
+                               transform=tf)
+        x = torch.stack([mnist[i][0] for i in range(min(n, len(mnist)))])
+        return x.flatten(1).mean(1).numpy()
+    saved = torch.load(run_dir / method / "results.pt", weights_only=False,
+                       map_location="cpu")
+    dataset = Path(saved.get("config", {}).get("dataset", ""))
+    if not dataset.is_file():
+        dataset = ROOT.parent / "lecture" / "lecture_3" / "esm2_example.csv"
+    rows = list(csv.DictReader(dataset.open(newline="")))
+    return np.array([charge(r["sequence"].strip().upper()) for r in rows])
+
+
+def fidelity_w1(generated, reference):
+    """Wasserstein-1 distance between two property samples, in reference sds.
+
+    A distribution comparison rather than a difference of means: at a low step
+    count a sampler can land the mean and still produce the wrong spread, and
+    that is exactly the failure a few-step study is looking for. Zero is a
+    perfect match; the scale is the data's own standard deviation, so the number
+    is comparable across modalities.
+    """
+    from scipy.stats import wasserstein_distance
+    sd = float(np.std(reference)) or 1.0
+    return float(wasserstein_distance(generated, reference)) / sd
+
+
 def real_image_reference(data_dir, n=2000):
     """Ink and saturation of real MNIST, the target a guided sample should match.
 
@@ -139,7 +182,15 @@ def main():
     x_label = ("integration steps" if args.x_axis == "steps"
                else "guidance strength eta")
 
+    if args.x_axis == "steps" and "diffusion" in args.methods:
+        print("  [skip] diffusion on a steps axis: --steps drives the FLOW "
+              "integrator only. The reverse chain walks K=--diffusion-steps, so "
+              "its runs at every level are the same run, and a coupling is flow-"
+              "only besides. Reporting flow alone.")
+        args.methods = [m for m in args.methods if m != "diffusion"] or ["flow"]
+
     rows, modality, missing = [], None, []
+    reference = {}
     for method in args.methods:
         for v in args.variants:
             for e in levels:
@@ -152,11 +203,17 @@ def main():
                     props, losses, modality = loaded
                     if "cfg" not in props or "single" not in props:
                         continue
+                    if method not in reference:
+                        reference[method] = reference_property(
+                            modality, d, method, args.data_dir)
                     row = {"method": method, "variant": v, "eta": e,
                            "level": e, "x_axis": args.x_axis, "seed": s,
                            "gain": props["single"].mean() - props["cfg"].mean(),
                            "unguided": props["cfg"].mean(),
                            "guided": props["single"].mean(),
+                           # Distribution fidelity of the UNGUIDED arm: what a
+                           # path or coupling actually changes.
+                           "w1": fidelity_w1(props["cfg"], reference[method]),
                            "loss_final": losses[-1] if len(losses) else np.nan}
                     if modality == "image":
                         ink, sat = image_fidelity(d, method)
@@ -171,6 +228,15 @@ def main():
     if missing:
         print(f"  {len(missing)} run(s) missing, e.g. {missing[0]}")
     label = "net charge" if modality == "protein" else "mean intensity (ink)"
+    # On a steps axis the study is about reproducing the data, not about
+    # guidance, so the reported quantity changes with the axis.
+    metric = "w1" if args.x_axis == "steps" else "gain"
+    y_label = (f"W1({label}) to the data, in sds  [lower is better]"
+               if metric == "w1" else f"guidance gain in {label}")
+    if metric == "gain" and all(r["gain"] == 0 for r in rows):
+        print("\n  [warn] every gain is exactly zero: the runs have eta=0, so "
+              "the guided arm IS the unguided arm. A guidance metric cannot "
+              "measure anything here -- read the w1 column instead.")
 
     fig, axes = plt.subplots(1, len(args.methods), figsize=(6.2 * len(args.methods), 4.6),
                              squeeze=False)
@@ -182,22 +248,23 @@ def main():
         for e in levels:
             line = f"{fmt_eta(e):>7}  "
             for v in args.variants:
-                g = [r["gain"] for r in rows
+                g = [r[metric] for r in rows
                      if r["method"] == method and r["variant"] == v and r["eta"] == e]
                 m, ci = mean_ci(g)
                 line += f"{f'{m:+.4f} +/- {ci:.4f} (n={len(g)})':>24}  "
             print(line)
         for v in args.variants:
-            pts = [mean_ci([r["gain"] for r in rows if r["method"] == method
+            pts = [mean_ci([r[metric] for r in rows if r["method"] == method
                             and r["variant"] == v and r["eta"] == e]) for e in levels]
             ax.errorbar(levels, [x[0] for x in pts], yerr=[x[1] for x in pts],
                         marker="o", capsize=4, color=COLORS.get(v),
                         label=VARIANT_LABEL.get(v, v))
-        ax.axhline(0, color="k", lw=0.8, ls=":")
+        ax.axhline(0, color="k", lw=0.8, ls=":",
+                   label="perfect match" if metric == "w1" else None)
         if min(levels) > 0:
             ax.set_xscale("log")
         ax.set_xlabel(x_label)
-        ax.set_ylabel(f"guidance gain in {label}")
+        ax.set_ylabel(y_label)
         ax.set_title(f"{method}: {len(args.seeds)} seeds, 95% interval")
         ax.legend()
     fig.tight_layout()

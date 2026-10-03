@@ -138,7 +138,11 @@ def main():
     p.add_argument("--outputs", type=Path, default=ROOT / "outputs")
     p.add_argument("--data-dir", type=Path, default=SHARED_DATA)
     p.add_argument("--variants", nargs="+", default=["st", "ep"])
-    p.add_argument("--etas", nargs="+", default=["1", "2", "5", "10"])
+    p.add_argument("--etas", nargs="+", default=["1", "2", "5", "10"],
+                   help="Directory levels. Pass step counts here for a steps "
+                        "sweep -- these are read as names, not numbers.")
+    p.add_argument("--x-axis", default="eta", choices=("eta", "steps"),
+                   help="What the levels mean, for the axis label and the plot.")
     p.add_argument("--seeds", type=int, nargs="+", default=[11, 12, 13, 14, 15])
     p.add_argument("--methods", nargs="+", default=["flow", "diffusion"])
     p.add_argument("--features", default="mnist", choices=("mnist", "inception"))
@@ -155,7 +159,8 @@ def main():
     real_feat = features_mnist(net, real) if net is not None else None
 
     rows = []
-    print(f"\n{'method':<11}{'var':<5}{'eta':>5}  {'mode':<9}{'FID':>10}{'seeds':>7}")
+    print(f"\n{'method':<11}{'var':<5}{args.x_axis:>5}  {'mode':<9}"
+          f"{'FID':>10}{'seeds':>7}")
     print("-" * 48)
     for method in args.methods:
         for v in args.variants:
@@ -176,6 +181,7 @@ def main():
                         continue
                     m = float(np.mean(per_seed))
                     rows.append({"method": method, "variant": v, "eta": e,
+                                 "level": e, "x_axis": args.x_axis,
                                  "mode": mode, "fid": m, "n_seeds": len(per_seed),
                                  "features": args.features})
                     print(f"{method:<11}{v:<5}{e:>5}  {mode:<9}{m:>10.2f}"
@@ -187,8 +193,39 @@ def main():
         w = csv.DictWriter(f, fieldnames=list(rows[0]))
         w.writeheader(); w.writerows(rows)
     print(f"\nWrote {path}")
-    print("cfg rows are the unguided reference: FID rising above them is the cost "
-          "of guidance.")
+
+    # The headline figure for the image modality: fidelity against compute. A
+    # path or coupling reaches the same marginal given enough steps and differs
+    # in how few it needs, so the result lives at the left of this plot and the
+    # lines are expected to meet at the right.
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    levels = [float(e) for e in args.etas]
+    fig, ax = plt.subplots(figsize=(6.6, 4.8))
+    for method in args.methods:
+        for v in args.variants:
+            xs, ys = [], []
+            for e, x in zip(args.etas, levels):
+                sel = [r for r in rows if r["method"] == method
+                       and r["variant"] == v and r["eta"] == e
+                       and r["mode"] == "cfg"]
+                if sel:
+                    xs.append(x); ys.append(float(np.mean([r["fid"] for r in sel])))
+            if xs:
+                ax.plot(xs, ys, marker="o",
+                        ls="-" if method == "flow" else "--", label=f"{method}/{v}")
+    ax.set_xscale("log")
+    ax.set_xlabel("integration steps" if args.x_axis == "steps"
+                  else "guidance strength eta")
+    ax.set_ylabel(f"FID ({args.features} features)  [lower is better]")
+    ax.set_title("Fidelity against compute, unguided arm")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    figpath = outdir / f"{args.prefix}_fid_vs_{args.x_axis}.png"
+    fig.savefig(figpath, dpi=150)
+    plt.close(fig)
+    print(f"Wrote {figpath}")
 
 
 if __name__ == "__main__":
