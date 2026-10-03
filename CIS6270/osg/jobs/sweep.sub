@@ -58,77 +58,23 @@ arguments  = "$(tag) $(BASE_ARGS) --dataset-tag $(tag) --seed $(seed) --sample-s
 transfer_input_files = dgm-src.tar.gz, inputs.tar.gz, esm-cache.tar.gz
 
 should_transfer_files   = YES
-# ON_EXIT transfers nothing when a job is evicted, which is how job 15833707
-# lost three hours of finished sampling to a memory kill. ON_EXIT_OR_EVICT
-# copies the named output files into the access point's SPOOL at eviction, so
-# they survive -- which is only useful because run_experiment.sh now stages
-# results.pt before anything memory-hungry runs. Condor holds the job if a
-# named file is missing at eviction, hence the empty placeholders.
+
 when_to_transfer_output = ON_EXIT_OR_EVICT
 transfer_output_files   = $(tag).tar.gz, $(tag)_flow_results.pt, $(tag)_diffusion_results.pt, $(tag)_manifest.txt
 transfer_output_remaps  = "$(tag)_flow_results.pt = $(OSDF_RUNS)/$(tag)/flow_results.pt; $(tag)_diffusion_results.pt = $(OSDF_RUNS)/$(tag)/diffusion_results.pt; $(tag)_manifest.txt = $(OSDF_RUNS)/$(tag)/manifest.txt"
 
-# CONFIRMED against a real OSPool run on an L40 (job 15833608, NCSU-OSG-CE1):
-#   Memory  usage 24,861 MB of 32,768 requested   <- 16GB would have been killed
-# but that was 12 arms WITHOUT --plot. The 20-arm config with --plot reached
-# 35,369 MB and was killed (job 15833707) by a quadratic pairwise-Hamming loop
-# over all 41,372 training sequences, now subsampled. 48GB carries the fixed
-# version with margin.
-#   Cpus    usage 1.99 of 2                       <- saturated; see the note below
-#   Disk    usage 9.0 GiB of 16 GiB               <- the .sif IS the disk request
-#   GPUs    usage 0.06                            <- 6%: the job is CPU-bound
-#
-# request_disk is dominated by the container image, not by the data: that run
-# received 9.51 GB, essentially all of it the ~8.8 GiB .sif. Inputs are 21 MB
-# and outputs ~780 MB for a full 100-sample run.
-#
-# Cpus sat at 1.99 of 2 while the GPU idled at 6%, because load_data encodes at
-# the module-level BATCH_SIZE of 16 in a plain Python loop with no DataLoader
-# workers. Raising this to 4 is cheap and worth one A/B against TimeExecute; it
-# matters less on a 250-epoch run, where training rather than encoding dominates.
-# ── environment the job script reads ─────────────────────────────────────────
-# These MUST go through `environment`. A bare `OSG_WANDB = 1` in a submit file
-# defines a Condor macro, not a job environment variable, and condor_submit
-# warns "was unused by condor_submit" -- the job never sees it.
-#
-#   OSG_WANDB              1 = write an offline W&B run into the results dir,
-#                          which the tarball carries home for `wandb sync` on
-#                          the access point. Needs wandb in the image (v2 does).
-#   OSG_METRICS            0 = skip the gfp_metrics table and the study figures
-#   OSG_BASELINE_N         random variants per setting for the control
-#   OSG_HEARTBEAT_SECONDS  how often the "alive" line prints, for tailing .out
-#   OSG_WITH_ORACLE        1 = score inline; needs METL in the image, which it
-#                          is not, so leave at 0 and score afterwards
+
 environment = "OSG_WANDB=1 OSG_METRICS=1 OSG_BASELINE_N=50 OSG_HEARTBEAT_SECONDS=300 OSG_WITH_ORACLE=0"
 
 request_gpus   = 1
 request_cpus   = 2
-request_memory = 48GB
+request_memory = 72GB
 request_disk   = 16GB
-# Measured per-epoch cost differs by ~3.4x across the GPUs this work landed on:
-# ~24 s per epoch-unit on an H100 (Capability 9.0) against ~81 s on an A40
-# (8.6). At 500 epochs that is 7.7 h against 25.6 h -- the second blows past
-# the 20 h "Long" ceiling and loses the run. So the 8.6 tier is excluded while
-# A100 (8.0), L40 (8.9) and H100 (9.0) are kept; anything below 8.0 is older
-# still. Fewer eligible nodes means a longer queue, which is the price of a
-# predictable runtime. Relax to (Capability >= 7.0) if you drop back to <= 250
-# epochs and would rather have the capacity.
+
 require_gpus        = (Capability != 8.6 && Capability >= 8.0)
-# 8,028 MB on the A40 (12 arms) and 9,516 MB on the H100 (20 arms). Back to
-# 12G: 10G left only 700 MB of headroom, and a node with exactly 10 GB would
-# have run out.
-# (Condor reported only 1,282 MB for the 2-epoch smoke run -- it samples
-# nvidia-smi periodically and caught the encode phase. Ignore that number.)
+
 gpus_minimum_memory = 12G
-# MEASURED, and important: the full 250-epoch long250 config ran over 21 hours
-# on the GB10 and was still sampling. That exceeds BOTH OSPool categories --
-# "Medium" is 10 h, "Long" is 20 h -- so 250 epochs cannot complete as a single
-# OSPool job. The job will be held.
-#
-# The loss curve says those epochs buy little past the halfway point: flow went
-# 0.3733 at epoch 124 to 0.3156 at 250, diffusion 0.1808 to 0.1663. Halving to
-# --epochs 125 lands near 10.5 h, which fits "Long" with margin. Reduce
-# --epochs above before submitting.
+
 +JobDurationCategory = "Long"
 
 # Stream stdout and stderr back to the access point as the job runs, instead
