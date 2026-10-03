@@ -48,6 +48,9 @@ case "$MODALITY" in
 esac
 
 LOGDIR="logs"; mkdir -p "$LOGDIR" outputs
+# Per-run logs live under the prefix, so one study's logs stay together and a
+# rerun overwrites only its own.
+RUNLOGDIR="$LOGDIR/$PREFIX"; mkdir -p "$RUNLOGDIR"
 LOG="$LOGDIR/${PREFIX}_$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee -a "$LOG") 2>&1
 say() { printf '\n[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
@@ -61,6 +64,7 @@ echo "  variants : $VARIANTS"
 echo "  epochs   : $EPOCHS   samples: $SAMPLES"
 echo "  extra    : ${EXTRA:-<none>}"
 echo "  log      : $LOG"
+echo "  run logs : $RUNLOGDIR/<run>.log  (one per run, kept on success too)"
 
 # ── preflight ────────────────────────────────────────────────────────────────
 fail=0
@@ -83,6 +87,14 @@ variant_flags() {
     base) echo "--coupling independent" ;; # the control every coupling is read against
     ot)   echo "--coupling ot" ;;                                  # option B
     c1)   echo "--coupling informed" ;;                            # option C1
+    # The two controls C1 needs. shuf keeps the map, the residual scale and the
+    # source marginal and destroys only which property belongs to which sample,
+    # so it isolates the INFORMATION. scaled drops the map entirely and keeps
+    # only the width, so it isolates the SCALE -- which matters because N(0,I)
+    # is 63% wider than MNIST as trained (data sd 0.614) while peptide latents
+    # are standardized to 1.000, and the informed source matches each.
+    shuf)   echo "--coupling informed-shuffled" ;;
+    scaled) echo "--coupling scaled" ;;
     c2)   echo "--coupling aux --coupling-beta ${BETA:-1.0}" ;;     # option C2
     d)    echo "--coupling aux --coupling-beta ${BETA:-1.0} --coupling-columns 1" ;;
     # The interpolant study: a geometry, a training schedule and a sampling grid
@@ -113,7 +125,11 @@ level_flag() {
 
 build_cmd() {
   local variant="$1" level="$2" seed="$3" dir="$4"
-  printf '%s -m %s %s --dataset-tag %s --seed %s --sample-seed %s %s --cfg-weight %s --epochs %s --samples %s --outdir %s %s %s' \
+  # -u is not cosmetic: with stdout block-buffered into a log, the whole run's
+  # output flushes at exit AFTER any stderr traceback, so the tail of a failed
+  # run's log shows its header instead of the error that killed it. Unbuffered
+  # also makes `tail -f` on a run log work while it is still going.
+  printf '%s -u -m %s %s --dataset-tag %s --seed %s --sample-seed %s %s --cfg-weight %s --epochs %s --samples %s --outdir %s %s %s' \
     "$PY" "$RUNNER" "$DATA_ARGS" "$(basename "$dir")" "$seed" "$seed" \
     "$(level_flag "$level")" \
     "$CFG_WEIGHT" "$EPOCHS" "$SAMPLES" "$dir" "$(variant_flags "$variant")" "$EXTRA"
@@ -132,13 +148,25 @@ for seed in $SEEDS; do
       fi
       cmd="$(build_cmd "$variant" "$eta" "$seed" "$dir")"
       if [ "$DRY_RUN" = "1" ]; then echo "  $cmd"; continue; fi
+      run="${PREFIX}_${variant}_${eta}_s${seed}"
+      # One log per run, kept whether it passed or failed. This used to go to
+      # /dev/null, which made every failure unreadable: a sweep would report 46
+      # failed runs and there was nothing to look at. The command itself goes in
+      # at the top, so the log is enough to reproduce the run by hand.
+      runlog="$RUNLOGDIR/${run}.log"
+      { echo "# $(date '+%F %T')"; echo "# $cmd"; echo; } > "$runlog"
       started=$SECONDS
-      if eval "$cmd" >/dev/null 2>&1; then
+      if eval "$cmd" >>"$runlog" 2>&1; then
         done_n=$((done_n+1))
-        printf '  %-42s %4ds\n' "${PREFIX}_${variant}_${eta}_s${seed}" $((SECONDS-started))
+        printf '  %-42s %4ds\n' "$run" $((SECONDS-started))
       else
-        FAILED+=("${PREFIX}_${variant}_${eta}_s${seed}")
-        say "FAILED: ${PREFIX}_${variant}_${eta}_s${seed} -- continuing"
+        status=$?
+        FAILED+=("$run")
+        say "FAILED (exit $status): $run -- continuing"
+        # The tail is almost always the traceback, which is what you need to see
+        # without opening the file.
+        sed -n '4,$p' "$runlog" | tail -n "${FAIL_TAIL:-8}" | sed 's/^/      | /'
+        echo "      full log: $runlog"
       fi
     done
   done
@@ -159,7 +187,11 @@ else
 fi
 
 say "finished"
-[ ${#FAILED[@]} -eq 0 ] || echo "  failed runs: ${FAILED[*]}"
+if [ ${#FAILED[@]} -ne 0 ]; then
+  echo "  failed runs: ${FAILED[*]}"
+  echo "  inspect:     tail -40 $RUNLOGDIR/${FAILED[0]}.log"
+fi
 echo "  results : outputs/${PREFIX}_*"
 echo "  figures : plots/${PREFIX}_sweep/"
 echo "  log     : $LOG"
+echo "  run logs: $RUNLOGDIR/"
