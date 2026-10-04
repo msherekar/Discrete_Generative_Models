@@ -223,6 +223,32 @@ if [ "${OSG_CHECK_ARMS:-1}" = "1" ] && [ -s "$TARGET" ]; then
     rm -rf check
 fi
 
+# ── optional: metrics on the node ────────────────────────────────────────────
+if [ "${OSG_METRICS:-1}" = "1" ]; then
+    ORACLE_NPZ=""
+    for candidate in "$DGM_ROOT/project1_eval/data"/avgfp_oracle*.npz; do
+        [ -f "$candidate" ] && ORACLE_NPZ="$candidate"
+    done
+    DATASET=""; prev=""
+    for a in "$@"; do [ "$prev" = "--dataset" ] && DATASET="$a"; prev="$a"; done
+    if [ -z "$ORACLE_NPZ" ]; then
+        say "[skip] no avgfp_oracle*.npz staged; not scoring"
+    else
+        say "scoring with $(basename "$ORACLE_NPZ")"
+        TRAIN_FLAG=()
+        [ -n "$DATASET" ] && TRAIN_FLAG=(--train "$DATASET")
+        "$PY" -u -m dgm.project1.gfp_metrics --run-dir "$OUT" \
+            --oracle "$ORACLE_NPZ" "${TRAIN_FLAG[@]}" \
+            --baseline-n "${OSG_BASELINE_N:-50}" --outdir "$OUT/metrics" \
+            || say "[warn] metrics failed; the run itself is unaffected"
+        say "study figures"
+        "$PY" -u -m dgm.project1.study_plots --run-dir "$OUT" \
+            --oracle "$ORACLE_NPZ" --outdir "$OUT/plots/study" \
+            --prefix "$TAG" \
+            || say "[warn] study figures failed; the run itself is unaffected"
+    fi
+fi
+
 # ── manifest and the light tarball ───────────────────────────────────────────
 {
     echo "tag       $TAG"
@@ -233,6 +259,8 @@ fi
     echo "results   $(du -h "$TARGET" 2>/dev/null | cut -f1)"
 } > "${TAG}_manifest.txt"
 
-tar -czf "${TAG}.tar.gz" -C "$SCRATCH" "results/$TAG" 2>/dev/null || \
+tar -czf "${TAG}.tar.gz" -C "$SCRATCH" "results/$TAG" || {
+    echo "[warn] results directory missing or unreadable; packaging manifest only" >&2
     tar -czf "${TAG}.tar.gz" "${TAG}_manifest.txt"
+}
 say "wrote ${TAG}.tar.gz and ${TAG}_manifest.txt"

@@ -109,6 +109,9 @@ def _validate_flow(model, dataset, path, batch_size, conditioning, n_cond, seed=
     model.eval()
     total, steps = 0.0, 0
     for z1, c, r_tilde in Batches(dataset, batch_size, seed=seed):
+        z1 = z1.to(DEVICE)
+        c = c.to(DEVICE)
+        r_tilde = r_tilde.to(DEVICE)
         cond = condition_for(c, r_tilde, conditioning, n_cond)
         for level in VAL_LEVELS:
             t = torch.full((len(z1),), level, device=DEVICE)
@@ -131,6 +134,9 @@ def _validate_diffusion(model, dataset, alpha_bars, batch_size, predict,
     K = model.K
     total, steps = 0.0, 0
     for z0, c, r_tilde in Batches(dataset, batch_size, seed=seed):
+        z0 = z0.to(DEVICE)
+        c = c.to(DEVICE)
+        r_tilde = r_tilde.to(DEVICE)
         cond = condition_for(c, r_tilde, conditioning, n_cond)
         for fraction in VAL_LEVELS:
             k = torch.full((len(z0),), int(fraction * K), device=DEVICE,

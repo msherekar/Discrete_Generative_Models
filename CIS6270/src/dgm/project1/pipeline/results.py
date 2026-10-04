@@ -4,6 +4,8 @@ The run configuration is saved alongside the samples because an arm name alone
 does not identify what was optimized -- the same lambda means a different
 tradeoff under a different sense or constraint.
 """
+from __future__ import annotations
+
 from pathlib import Path
 
 import torch

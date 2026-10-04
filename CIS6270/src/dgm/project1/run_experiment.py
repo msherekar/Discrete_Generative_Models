@@ -107,15 +107,31 @@ def main():
     spec  = build_objective(args, parser, setup)
     print(describe_innovations(args))
 
-    # The validation split is encoded with the same ESM-2 weights and the same
-    # standardization statistics the training split produced, so the two losses
+    # The validation split is encoded with the same ESM-2 weights and THEN
+    # re-standardized with the training split's statistics, so the two losses
     # are on one scale and the epoch budget can be read off the val curve
     # rather than guessed; see Stage 0.5.3.
+    # load_data standardizes each split with its own per-CSV statistics; we must
+    # undo the val-CSV standardization and apply the training statistics instead.
     val_dataset = None
     if args.val_dataset is not None:
         print(f"\nEncoding validation split {args.val_dataset.name}...")
-        val_dataset = load_data(args.val_dataset, model_info["hf_id"], cache_dir,
-                                args.max_length, **latent_kwargs(args))[0]
+        val_ds, _, _, val_stats, _ = load_data(
+            args.val_dataset, model_info["hf_id"], cache_dir,
+            args.max_length, **latent_kwargs(args))
+        # Re-standardize latents and properties using training statistics.
+        import torch as _torch
+        from torch.utils.data import TensorDataset as _TDS
+        zv, cv, rv = val_ds.tensors
+        s = setup.stats
+        # Undo val-CSV standardization, apply training standardization.
+        zv_rescaled = ((zv.float() * val_stats["z_std"].to(zv.device)
+                        + val_stats["z_mean"].to(zv.device))
+                       - s["z_mean"].to(zv.device)) / s["z_std"].to(zv.device)
+        rv_rescaled = ((rv.float() * val_stats["r_std"].to(rv.device)
+                        + val_stats["r_mean"].to(rv.device))
+                       - s["r_mean"].to(rv.device)) / s["r_std"].to(rv.device)
+        val_dataset = _TDS(zv_rescaled.to(zv.dtype), cv, rv_rescaled)
 
     guide_kwargs = sample_kwargs(args)
     oracle, oracle_path = resolve_oracle(args, setup.length)

@@ -32,7 +32,7 @@ OSG_AP   = ap40
 
 OSDF_IMAGE = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/containers
 OSDF_RUNS  = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/runs
-IMAGE_VERSION = v2
+IMAGE_VERSION = v3
 
 PARAMS = gfp_baseline_params.txt
 

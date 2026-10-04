@@ -18,7 +18,7 @@ OSG_AP   = ap40
 #   OSDF_RUNS   where this run's heavy outputs are written
 OSDF_IMAGE = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/containers
 OSDF_RUNS  = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/runs
-IMAGE_VERSION = v2
+IMAGE_VERSION = v3
 
 PARAMS = sweep_params.txt
 
@@ -68,7 +68,7 @@ environment = "OSG_WANDB=1 OSG_METRICS=1 OSG_BASELINE_N=50 OSG_HEARTBEAT_SECONDS
 
 request_gpus   = 1
 request_cpus   = 2
-request_memory = 72GB
+request_memory = 48GB
 request_disk   = 16GB
 
 require_gpus        = (Capability != 8.6 && Capability >= 8.0)
