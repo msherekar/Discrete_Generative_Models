@@ -1,0 +1,67 @@
+# Stage 6: transfer the headline innovation to MNIST at matched NFE.
+#
+#   condor_submit mnist_transfer.sub
+#
+# Only the headline innovation and its controls run here, not the whole ladder.
+# The question is narrow and the answer is falsifiable either way: does the
+# SNR-matched guidance scaling, which is derived and therefore dimension- and
+# modality-free, still help on a modality whose latents are 1x28x28 images
+# rather than 237x320 protein embeddings?
+#
+# A null or negative result is a finding and should be reported as one. That is
+# the point of choosing a derived innovation over a tuned one: a tuned constant
+# would simply need re-tuning here and the transfer test would say nothing.
+#
+# MNIST is far cheaper than avGFP -- 20k 28x28 images against 41k 237x320
+# latents -- so these are short jobs on modest resources.
+
+OSG_USER = mukul.sherekar
+OSG_AP   = ap40
+
+OSDF_IMAGE = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/containers
+OSDF_RUNS  = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/runs
+IMAGE_VERSION = v2
+
+PARAMS = mnist_transfer_params.txt
+
+BASE_ARGS = --limit 20000 \
+            --channels 32 \
+            --normalize-guidance --endpoint-guidance \
+            --guidance-clip 2.0 \
+            --samples 200
+
+universe        = container
+container_image = $(OSDF_IMAGE)/dgm-gpu-$(IMAGE_VERSION).sif
+
+executable = mnist_transfer.sh
+arguments  = "$(tag) $(BASE_ARGS) --dataset-tag $(tag) --seed $(seed) --sample-seed $(seed) --epochs $(epochs) --batch-size $(batch) --unet $(unet) --predict $(predict) --beta-schedule $(beta) --loss-weighting $(weighting) --steps $(steps) --diffusion-steps $(K) --cfg-weight $(cfg) --reward-eta $(eta) --ema $(ema)"
+
+transfer_input_files = dgm-src.tar.gz, mnist-data.tar.gz
+
+should_transfer_files   = YES
+when_to_transfer_output = ON_EXIT_OR_EVICT
+transfer_output_files   = $(tag).tar.gz, $(tag)_results.pt
+transfer_output_remaps  = "$(tag)_results.pt = $(OSDF_RUNS)/$(tag)/results.pt"
+
+environment = "OSG_HEARTBEAT_SECONDS=300 MPLBACKEND=Agg"
+
+request_gpus   = 1
+request_cpus   = 2
+request_memory = 12GB
+request_disk   = 8GB
+
+require_gpus        = (Capability != 8.6 && Capability >= 8.0)
+gpus_minimum_memory = 12G
+
++JobDurationCategory = "Medium"
+
+stream_output = True
+stream_error  = True
+
+output = logs/$(tag).$(ClusterId).$(ProcId).out
+error  = logs/$(tag).$(ClusterId).$(ProcId).err
+log    = logs/mnist_transfer.$(ClusterId).log
+
+max_retries = 3
+
+queue tag, seed, epochs, batch, unet, predict, beta, weighting, steps, K, cfg, eta, ema from $(PARAMS)

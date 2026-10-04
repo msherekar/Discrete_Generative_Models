@@ -149,7 +149,7 @@ trap 'kill "$HEARTBEAT" 2>/dev/null || true' EXIT
 
 say "running: $* --outdir $OUT ${ORACLE_FLAG[*]:-}"
 "$PY" -u -m dgm.project1.run_experiment "$@" \
-    --outdir "$OUT" "${ORACLE_FLAG[@]:-}"
+    --outdir "$OUT" ${ORACLE_FLAG[@]+"${ORACLE_FLAG[@]}"}
 
 kill "$HEARTBEAT" 2>/dev/null || true
 trap - EXIT

@@ -1,0 +1,114 @@
+# The avGFP innovation sweep: one GPU job per line of a params file.
+#
+#   condor_submit gfp_sweep.sub -append 'PARAMS = gfp_baseline_params.txt'
+#   condor_submit gfp_sweep.sub -append 'PARAMS = gfp_axis_params.txt'
+#
+# Differs from sweep.sub in four ways, each measured rather than guessed:
+#
+#  1. request_memory is 24GB, down from 72GB. Job 15833935 was held at
+#     63,646 MB against a 60,000 MB request, and essentially all of it was four
+#     simultaneous copies of the same 12.55 GB latent tensor in load_data
+#     (the `encoded` list, the torch.cat result, and two temporaries from
+#     standardizing). That is now a preallocated float16 buffer standardized in
+#     place, so the peak is ~6.3 GB and 24GB carries it with room for the
+#     optimizer state and the per-arm sample latents.
+#
+#  2. --plot is GONE. It ran in-process after both models had finished training
+#     and is what pushed the job past its memory limit, losing ten hours of
+#     completed work. Plot locally from the transferred results.pt with
+#     dgm-postprocess.
+#
+#  3. METHOD is a parameter, so flow and diffusion are separate submissions.
+#     Both finished in job 15833935 and both were lost. Two ~30-minute jobs also
+#     drop out of JobDurationCategory "Long", which matches far faster than the
+#     measured 27-minute queue wait for a long slot.
+#
+#  4. request_cpus stays at 2 because the training loop no longer assembles
+#     batches on the host: the latents live in VRAM (6.3 GB of 80) and batching
+#     is an on-device randperm. CPU usage was 0.99 of 4 requested before that.
+
+OSG_USER = mukul.sherekar
+OSG_AP   = ap40
+
+OSDF_IMAGE = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/containers
+OSDF_RUNS  = osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/runs
+IMAGE_VERSION = v2
+
+PARAMS = gfp_baseline_params.txt
+
+# Everything every job shares. All the sampling-time variation lives here,
+# because those flags read one trained field and cost a sampling pass each
+# rather than another job's queue wait and image transfer.
+#
+# --mut-budget is a CEILING (no --exact-mutations). Note what the arms
+# diagnostic found: under a BINDING budget every arm spends the whole thing, so
+# Hamming-to-reference is identical across arms with zero variance and cannot
+# discriminate them. That is the most likely reading of the 8.2-8.4 uniformity
+# in the earlier run. Report oracle brightness and pairwise sequence overlap;
+# dgm-check-arms prints both.
+BASE_ARGS = --esm-model esm2_8m \
+            --dataset data/avgfp_train_props.csv \
+            --val-dataset data/avgfp_val.csv \
+            --max-length 237 \
+            --reference data/avgfp_wt.txt \
+            --restrict-support data/avgfp_oracle_v2.npz \
+            --minimize 2 \
+            --constraint-property 3 --constraint-rho 1.0 \
+            --normalize-guidance --endpoint-guidance \
+            --guidance-clip 2.0 \
+            --mut-budget 15 10 5 \
+            --decode-temperature 0.7 \
+            --freeze-positions 63,64,65 \
+            --cfg-weight 0 1 2 4 \
+            --reward-eta 10 30 60 \
+            --reward-lambda 0.3 0.5 0.7 \
+            --setpoint 50 90 99 --setpoint-percentile --setpoint-saturation 6 \
+            --samples 100
+
+universe        = container
+container_image = $(OSDF_IMAGE)/dgm-gpu-$(IMAGE_VERSION).sif
+
+executable = gfp_sweep.sh
+arguments  = "$(tag) $(METHOD) $(BASE_ARGS) --dataset-tag $(tag) --seed $(seed) --sample-seed $(seed) --epochs $(epochs) --batch-size $(batch) --hidden $(hidden) --arch transformer --conditioning $(conditioning) --n-cond 3 --modulation $(modulation) --predict $(predict) --beta-schedule $(beta) --loss-weighting $(weighting) --path-geometry $(geometry) --time-schedule $(tschedule) --coupling $(coupling) --flow-solver $(fsolver) --diffusion-solver $(dsolver) --steps $(steps) --sample-steps $(steps) --guidance-scaling $(scaling) --censor-floor $(censor) --ema $(ema) --warmup $(warmup) --diffusion-steps $(K)"
+
+# The cached latents replace both the per-job encode of 41,372 sequences and
+# the ESM-2 weights themselves; see dgm-cache-latents.
+transfer_input_files = dgm-src.tar.gz, inputs.tar.gz, esm-cache.tar.gz, latent-cache.tar.gz
+
+should_transfer_files   = YES
+when_to_transfer_output = ON_EXIT_OR_EVICT
+transfer_output_files   = $(tag).tar.gz, $(tag)_$(METHOD)_results.pt, $(tag)_manifest.txt
+transfer_output_remaps  = "$(tag)_$(METHOD)_results.pt = $(OSDF_RUNS)/$(tag)/$(METHOD)_results.pt; $(tag)_manifest.txt = $(OSDF_RUNS)/$(tag)/manifest.txt"
+
+# OSG_WITH_ORACLE=1 is now viable: metl-pretrained resolves with no new
+# dependencies beyond torch (verified by dry-run install), unlike the full metl
+# repo which needs pytorch-lightning plus five others. The finetuned GFP target
+# model is 9.4 MB and ships in the latent cache.
+environment = "OSG_WANDB=1 OSG_METRICS=1 OSG_BASELINE_N=50 OSG_HEARTBEAT_SECONDS=300 OSG_WITH_ORACLE=1 METL_TARGET=ft-1d"
+
+request_gpus   = 1
+request_cpus   = 2
+request_memory = 24GB
+request_disk   = 20GB
+
+require_gpus        = (Capability != 8.6 && Capability >= 8.0)
+
+# bfloat16 autocast wants a card that has it natively; 8.0 is Ampere and up.
+# 16G rather than 12G because the float16 latent buffer is 6.3 GB resident.
+gpus_minimum_memory = 16G
+
+# One model per job now, so these are ~30-minute jobs rather than ten-hour
+# ones, and they match against the much larger pool of Medium slots.
++JobDurationCategory = "Medium"
+
+stream_output = True
+stream_error  = True
+
+output = logs/$(tag)_$(METHOD).$(ClusterId).$(ProcId).out
+error  = logs/$(tag)_$(METHOD).$(ClusterId).$(ProcId).err
+log    = logs/gfp_sweep.$(ClusterId).log
+
+max_retries = 3
+
+# Every column is a TRAINING-time choice; sampling-time flags are in BASE_ARGS.
+queue tag, METHOD, seed, epochs, batch, hidden, conditioning, modulation, predict, beta, weighting, geometry, tschedule, coupling, fsolver, dsolver, steps, scaling, censor, ema, warmup, K from $(PARAMS)
