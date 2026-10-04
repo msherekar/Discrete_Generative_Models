@@ -50,6 +50,10 @@ dgm-plot-guidance-sweep = "dgm.project1.plot_guidance_sweep:main"
 dgm-wandb              = "dgm.project1.wandb_cli:main"
 dgm-study-plots        = "dgm.project1.study_plots:main"
 dgm-transfer           = "dgm.project1.transfer:main"
+dgm-postprocess        = "dgm.project1.postprocess:main"
+dgm-cache-latents      = "dgm.project1.cache_latents:main"
+dgm-check-arms         = "dgm.project1.diagnostics.check_arms:main"
+dgm-anneal             = "dgm.project1.baselines.anneal:main"
 
 [build-system]
 requires = ["hatchling"]
