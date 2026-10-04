@@ -1,10 +1,137 @@
-"""Differentiating the objective with respect to the latent.
+"""Differentiating the objective with respect to the latent, and scaling it.
 
-One function, because every guided sampler needs exactly this: the
+One gradient function, because every guided sampler needs exactly this: the
 lambda-weighted reward gradient, optionally normalized per objective, clipped,
-and evaluated on a predicted clean endpoint.
+and evaluated on a predicted clean endpoint. Then the scaling rule that makes
+one eta mean the same intervention in both samplers.
 """
 import torch
+
+from .paths import _geometry, _schedule, resolve_path
+
+# How eta is converted into a perturbation of the sampler's own update.
+GUIDANCE_SCALINGS = ("score", "legacy", "constant")
+
+# Largest score-to-velocity factor the flow sampler will apply. The exact
+# factor diverges as t -> 0, where a vanishing signal coefficient means a
+# finite score change implies an unbounded velocity change; see
+# score_to_velocity.
+MAX_VELOCITY_SCALE = 10.0
+
+
+def score_to_velocity(t, path_kwargs=None, cap=MAX_VELOCITY_SCALE):
+    """Factor converting a score perturbation into a velocity perturbation.
+
+    This is the headline innovation, and it exists because the two samplers
+    were not applying the same intervention for the same eta. The flow sampler
+    multiplied the reward gradient by `eta * 4t(1-t)` -- a bump function with
+    no derivation behind it, chosen so the guidance switches off at both ends
+    -- while the diffusion sampler used `eta * sigma_k`, which does follow from
+    the lectures. Same nominal eta, different physical intervention, so no
+    flow-versus-diffusion guidance comparison was meaningful and no eta
+    transferred between modalities (hence the `eta / sqrt(D)` hack in
+    transfer.py).
+
+    The common currency is the score. Lecture 3.4 derives reward tilting as
+
+        p^(R) ∝ p exp(eta R)   =>   s^(R) = s + eta grad R
+
+    so the perturbation each sampler must express is a change to the score by
+    `eta grad R`. What differs is only the Jacobian of its own update with
+    respect to the score, and that is exactly computable.
+
+    For the interpolant X_t = a(t) X0 + b(t) X1 with X0 ~ N(0, I), the marginal
+    score and the conditional expectations are related by
+
+        s_t = -E[X0 | z] / a        E[X1 | z] = (z + a^2 s_t) / b
+
+    and the marginal velocity v_t = a' E[X0|z] + b' E[X1|z] becomes
+
+        v_t = (b'/b) z + a^2 (b'/b - a'/a) s_t
+
+    so a score change ds implies a velocity change
+
+        dv = a(t)^2 (b'(t)/b(t) - a'(t)/a(t)) ds.
+
+    For the straight segment on linear time this is (1-t)/t, which is nothing
+    like 4t(1-t): it is largest at t -> 0 where the old rule was smallest. The
+    old bump therefore applied the least guidance exactly where the score is
+    most informative about which mode the trajectory will land in, which is a
+    plausible reason the measured guidance arms were nearly indistinguishable
+    (diffusion Hamming 8.2-8.4 across every cfg, eta, lambda and setpoint).
+
+    `cap` bounds the factor near t=0, where it diverges because a -> 0.
+    """
+    kwargs = dict(path_kwargs or {})
+    scale = kwargs.pop("scale", 1.0)
+    geometry, schedule = resolve_path(**kwargs)
+    shape = (-1,) + (1,) * 2
+    s, _ = _schedule(t, schedule)
+    a, b, da_ds, db_ds = _geometry(s, geometry, scale)
+    # The ds/dt factors cancel in the ratio b'/b - a'/a, so the schedule drops
+    # out here and only the geometry matters -- which is the same cancellation
+    # endpoint_from_velocity relies on, and the reason this is well conditioned
+    # under the quadratic and cosine schedules.
+    ratio = db_ds / b.clamp_min(1e-6) - da_ds / a.clamp_min(1e-6)
+    return (a.pow(2) * ratio).clamp(-cap, cap).view(shape)
+
+
+def velocity_guidance_scale(eta, t, scaling="score", path_kwargs=None):
+    """Coefficient on the reward gradient inside the flow sampler.
+
+      score     the derived factor above, so eta is a score-space strength.
+      legacy    eta * 4t(1-t), the underived bump, kept as the ablation that
+                shows the derivation is what matters and not merely the change.
+      constant  eta, the mechanism-destroyed control: same average magnitude,
+                no time dependence at all.
+    """
+    if scaling == "legacy":
+        return eta * 4 * t.view(-1, 1, 1) * (1 - t.view(-1, 1, 1))
+    if scaling == "constant":
+        return eta * torch.ones_like(t).view(-1, 1, 1)
+    if scaling == "score":
+        return eta * score_to_velocity(t, path_kwargs)
+    raise ValueError(f"unknown scaling '{scaling}', expected {GUIDANCE_SCALINGS}")
+
+
+def noise_guidance_scale(eta, sigma, scaling="score"):
+    """Coefficient on the reward gradient inside the diffusion sampler.
+
+    Subtracted from the noise estimate, since eps = -sigma * s means a score
+    increase is a noise DECREASE. This already followed from Lecture 3.4's
+    s = -eps/sigma, so "score" reproduces the existing diffusion behaviour
+    exactly -- which is the point: the innovation brings flow into line with
+    diffusion rather than changing both.
+    """
+    if scaling == "constant":
+        return eta * torch.ones_like(sigma)
+    return eta * sigma
+
+
+def add_arguments(parser):
+    """Axis D / Stage 2.4 flags: how eta becomes an intervention."""
+    group = parser.add_argument_group("guidance scaling (Stage 2.4)")
+    group.add_argument("--guidance-scaling", default="score",
+                       choices=GUIDANCE_SCALINGS,
+                       help="How --reward-eta is converted into a "
+                            "perturbation of the sampler's own update "
+                            "(default: score). 'score' makes eta a "
+                            "score-space strength in both samplers, derived "
+                            "from Lecture 3.4's reward tilting. 'legacy' is "
+                            "the flow sampler's eta*4t(1-t) bump, which "
+                            "follows from nothing and applies the LEAST "
+                            "guidance where the score is most informative; "
+                            "'constant' is the mechanism-destroyed control "
+                            "that keeps the magnitude and drops the time "
+                            "dependence.")
+    group.add_argument("--max-velocity-scale", type=float,
+                       default=MAX_VELOCITY_SCALE, metavar="M",
+                       help=f"Bound on the score-to-velocity factor near t=0, "
+                            f"where it diverges because the signal "
+                            f"coefficient vanishes (default: "
+                            f"{MAX_VELOCITY_SCALE:g}).")
+    return parser
+
 
 def reward_gradient(reward_model, z, t, lambdas, clip=0.0, normalize=False,
                     endpoint=None, objective=None):

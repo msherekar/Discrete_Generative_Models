@@ -45,7 +45,10 @@ def _resolve_setpoints(args, parser, raw_r1) -> list:
     if args.setpoint_percentile:
         if any(not 0.0 <= v <= 100.0 for v in setpoint_raw):
             parser.error("--setpoint-percentile expects values in [0, 100]")
-        return [float(np.percentile(raw_r1.numpy(), v)) for v in setpoint_raw]
+        # .cpu() for the same reason as in _reference_constraint_value: the
+        # property columns follow the latents onto the GPU.
+        values = raw_r1.detach().cpu().numpy()
+        return [float(np.percentile(values, v)) for v in setpoint_raw]
     if setpoint_raw:
         low, high = float(raw_r1.min()), float(raw_r1.max())
         outside = [v for v in setpoint_raw if not low <= v <= high]
@@ -115,7 +118,12 @@ def _reference_constraint_value(raw_c, reference, prop_names, index,
         return float(attr[_eo.attribute_index(
             "total_score" if name == "r3" else name)])
     except Exception as exc:                            # noqa: BLE001
-        fallback = float(np.median(raw_c.numpy()))
+        # .cpu() is required, not defensive. The property columns now live
+        # wherever the latents do (see choose_latent_device), so on a GPU node
+        # raw_c is a cuda tensor and .numpy() raises TypeError -- which turned
+        # this *fallback* path into a hard crash exactly when the primary paths
+        # had already failed, so the warning it exists to print never appeared.
+        fallback = float(np.median(raw_c.detach().cpu().numpy()))
         print(f"  [warn] could not read the reference value for "
               f"{prop_names[index]} ({exc}); falling back to "
               f"the training median {fallback:+.3f}. Stage "

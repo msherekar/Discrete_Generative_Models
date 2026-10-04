@@ -10,7 +10,13 @@ from dgm.common.paths import lecture_dir
 
 from .config import BATCH_SIZE, HIDDEN
 from .coupling import add_arguments as add_coupling_arguments
+from .guidance import add_arguments as add_guidance_arguments
+from .losses import add_arguments as add_objective_arguments
+from .optim import add_arguments as add_optim_arguments
 from .paths import add_arguments as add_path_arguments
+from .schedules import add_arguments as add_schedule_arguments
+from .solvers import add_arguments as add_solver_arguments
+from .trunks import add_arguments as add_trunk_arguments
 
 DEFAULT_DATASET = lecture_dir(3) / "esm2_example.csv"
 
@@ -69,11 +75,20 @@ def build_parser(description=None):
                              "(default: 0 = no clipping). Lecture 3.4: 'Clip unusually "
                              "large guidance gradients'. Without it, diffusion diverged "
                              "at eta=50.")
-    parser.add_argument("--predict", default="eps", choices=("eps", "x0"),
-                        help="What the diffusion network predicts (default: eps). "
-                             "'x0' is Lecture 3.3's AMP-Diffusion recipe and makes the "
-                             "network responsible at every noise level; with 'eps' its "
-                             "weight exceeds 0.5 for only 369 of 1000 steps.")
+    parser.add_argument("--predict", default="x0", choices=("x0", "v", "eps"),
+                        help="What the diffusion network predicts (default: x0, "
+                             "changed from eps in Stage 4C). 'x0' is Lecture 3.2's "
+                             "AMP-Diffusion recipe -- 'directly predict denoised latent "
+                             "and train using MSE loss' -- and makes the network "
+                             "responsible at every noise level. With 'eps' the output "
+                             "is sqrt(1-abar) z + sqrt(abar) net(.), so at high noise "
+                             "the network is handed a nearly correct answer: its weight "
+                             "exceeds 0.5 for only 369 of 1000 steps, and 500 epochs on "
+                             "an H100 moved the loss from 0.1819 to 0.1799. Measured on "
+                             "the point-mass recovery test, x0 recovers the mean to "
+                             "+1.004 against a true +1.0 while eps does not recover it "
+                             "at all. 'v' is Salimans & Ho's velocity target, which is "
+                             "well conditioned at BOTH ends of the schedule.")
     parser.add_argument("--ema", type=float, default=0.0, metavar="DECAY",
                         help="Exponential moving average of diffusion weights for "
                              "sampling, e.g. 0.999 (default: 0 = off). Standard in DDPM "
@@ -131,6 +146,20 @@ def build_parser(description=None):
                              "e.g. '0'. The avGFP wild type here omits the initiator "
                              "methionine, so ESM puts one back at position 0 and that "
                              "substitution otherwise dominates every sample.")
+    parser.add_argument("--only", default=None, choices=("flow", "diffusion"),
+                        help="Train and sample only one of the two heads "
+                             "(default: both, the historical behaviour). One "
+                             "method per OSG job halves what an eviction "
+                             "costs: job 15833935 trained both, finished both, "
+                             "and lost both when it was held during plotting. "
+                             "Two ~30-minute jobs also match against the "
+                             "Medium slot pool instead of Long.")
+    add_trunk_arguments(parser)
+    add_schedule_arguments(parser)
+    add_objective_arguments(parser)
+    add_solver_arguments(parser)
+    add_guidance_arguments(parser)
+    add_optim_arguments(parser)
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE, metavar="N",
                         help=f"Training minibatch size (default: {BATCH_SIZE}). The "
                              "default suits the 64-sequence teaching set; at tens of "

@@ -52,6 +52,9 @@ from .pipeline.results import save_results
 from .pipeline.runconfig import build_run_config
 from .pipeline.sampling import sample_diffusion, sample_flow
 from .pipeline.training import train_diffusion, train_flow
+from .pipeline.wiring import (describe_innovations, diffusion_sample_kwargs,
+                              diffusion_train_kwargs, flow_sample_kwargs,
+                              flow_train_kwargs, latent_kwargs, sample_kwargs)
 
 __all__ = [
     "AMINO_ACIDS", "BATCH_SIZE", "CONDITION_DROP", "DEVICE", "HIDDEN",
@@ -102,11 +105,19 @@ def main():
 
     setup = prepare_run(args, parser, model_info, cache_dir)
     spec  = build_objective(args, parser, setup)
+    print(describe_innovations(args))
 
-    guide_kwargs = {"clip": args.guidance_clip,
-                    "normalize": args.normalize_guidance,
-                    "endpoint_guidance": args.endpoint_guidance,
-                    "seed": args.sample_seed}
+    # The validation split is encoded with the same ESM-2 weights and the same
+    # standardization statistics the training split produced, so the two losses
+    # are on one scale and the epoch budget can be read off the val curve
+    # rather than guessed; see Stage 0.5.3.
+    val_dataset = None
+    if args.val_dataset is not None:
+        print(f"\nEncoding validation split {args.val_dataset.name}...")
+        val_dataset = load_data(args.val_dataset, model_info["hf_id"], cache_dir,
+                                args.max_length, **latent_kwargs(args))[0]
+
+    guide_kwargs = sample_kwargs(args)
     oracle, oracle_path = resolve_oracle(args, setup.length)
     arms       = build_arms(args, parser, spec)
     path       = PathSpec.from_args(args, setup.dataset.tensors[0])
@@ -116,37 +127,45 @@ def main():
                   args.min_polar)
 
     # ── Flow matching ─────────────────────────────────────────────────────────
-    print("\nTraining flow matching model...")
-    torch.manual_seed(args.seed)
-    columns = ([c - 1 for c in args.coupling_columns]
-               if args.coupling_columns else None)
-    flow_model, flow_reward, flow_losses, flow_source = train_flow(
-        setup.dataset, args.epochs, args.batch_size, args.hidden,
-        path, args.arch, args.coupling, args.coupling_beta, columns)
+    flow_latents = flow_model = flow_reward = flow_source = None
+    flow_losses = []
+    if args.only in (None, "flow"):
+      print("\nTraining flow matching model...")
+      torch.manual_seed(args.seed)
+      columns = ([c - 1 for c in args.coupling_columns]
+                 if args.coupling_columns else None)
+      flow_model, flow_reward, flow_losses, flow_source = train_flow(
+          setup.dataset, args.epochs,
+          **flow_train_kwargs(args, setup.stats, val_dataset, path, columns))
 
-    print("\nSampling (flow)...")
-    flow_latents = _sample_all(
-        lambda **kw: sample_flow(flow_model, flow_reward, **kw),
-        arms, setup, oracle, args.samples, guide_kwargs,
-        extra={"path": path, "steps": args.steps, "source": flow_source})
-    save_results(out_root, "flow", flow_latents, flow_model, flow_reward,
-                 *save_args, flow_losses, run_config)
+      print("\nSampling (flow)...")
+      flow_latents = _sample_all(
+          lambda **kw: sample_flow(flow_model, flow_reward, **kw),
+          arms, setup, oracle, args.samples, guide_kwargs,
+          extra=flow_sample_kwargs(args, path, flow_source))
+      save_results(out_root, "flow", flow_latents, flow_model, flow_reward,
+                   *save_args, flow_losses, run_config)
+
 
     # ── Diffusion ─────────────────────────────────────────────────────────────
-    print("\nTraining diffusion model...")
-    torch.manual_seed(args.seed)
-    diff_model, diff_reward, diff_losses, alpha_bars, betas, alphas, post_vars = \
-        train_diffusion(setup.dataset, args.epochs, args.batch_size, args.hidden,
-                        args.arch, args.predict, args.diffusion_steps,
-                        args.stratified_timesteps, args.ema)
+    diff_latents = diff_model = diff_reward = None
+    diff_losses, alpha_bars, betas, alphas, post_vars = [], None, None, None, None
+    if args.only in (None, "diffusion"):
+      print("\nTraining diffusion model...")
+      torch.manual_seed(args.seed)
+      diff_model, diff_reward, diff_losses, alpha_bars, betas, alphas, post_vars = \
+          train_diffusion(setup.dataset, args.epochs,
+                          **diffusion_train_kwargs(args, setup.stats, val_dataset))
 
-    print("\nSampling (diffusion)...")
-    diff_latents = _sample_all(
-        lambda **kw: sample_diffusion(diff_model, diff_reward, alpha_bars,
-                                      betas, alphas, post_vars, **kw),
-        arms, setup, oracle, args.samples, guide_kwargs)
-    save_results(out_root, "diffusion", diff_latents, diff_model, diff_reward,
-                 *save_args, diff_losses, run_config)
+      print("\nSampling (diffusion)...")
+      diff_latents = _sample_all(
+          lambda **kw: sample_diffusion(diff_model, diff_reward, alpha_bars,
+                                        betas, alphas, post_vars, **kw),
+          arms, setup, oracle, args.samples, guide_kwargs,
+          extra=diffusion_sample_kwargs(args))
+      save_results(out_root, "diffusion", diff_latents, diff_model, diff_reward,
+                   *save_args, diff_losses, run_config)
+
 
     print(f"\nDone. Results in {out_root}/")
 
@@ -154,7 +173,7 @@ def main():
         oracle_summary(args, setup, arms, flow_latents, diff_latents,
                        oracle_path, out_root)
 
-    if args.plot or args.ablate:
+    if (args.plot or args.ablate) and args.only is None:
         generate_plots(
             args, setup,
             (flow_latents, flow_model, flow_reward, flow_losses),

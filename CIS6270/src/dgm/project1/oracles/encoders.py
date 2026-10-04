@@ -4,6 +4,7 @@ Mean pooling over 237 residues destroys the signal from a handful of
 substitutions, so positional resolution is kept and optionally projected down
 with a fitted PCA basis.
 """
+import os
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +14,22 @@ from dgm.common.paths import cache_dir as project_cache
 from .common import ESM_HF, device
 from .metl import encode_metl
 
+
+def _weight_cache(explicit=None):
+    """Where the ESM-2 weights are, honouring $ESM2_CACHE.
+
+    pipeline/config.resolve_cache_dir already does this for the training path,
+    but these encoders went straight to project_cache() and so ignored it. On a
+    worker node the weights are staged to $SCRATCH/esm-cache while
+    project_cache() points at an empty project1_eval/cache, and with
+    HF_HUB_OFFLINE=1 the oracle died on a HuggingFace lookup after training and
+    sampling had already succeeded.
+
+    Read here rather than imported from pipeline.config to keep oracles/ free
+    of a dependency on pipeline/, which imports oracles/ in turn.
+    """
+    return Path(explicit or os.environ.get("ESM2_CACHE") or project_cache())
+
 def encode_esm(sequences: list[str], wt: str, tag: str,
                cache_dir: Path | None = None, batch_size: int = 32) -> np.ndarray:
     """Per-residue ESM-2 embedding minus wild type, flattened to keep position."""
@@ -20,7 +37,7 @@ def encode_esm(sequences: list[str], wt: str, tag: str,
     from transformers import AutoTokenizer, EsmForMaskedLM
     if tag not in ESM_HF:
         raise ValueError(f"Unknown ESM tag '{tag}'. Known: {', '.join(ESM_HF)}")
-    cache_dir = cache_dir or project_cache()
+    cache_dir = _weight_cache(cache_dir)
     tokenizer = AutoTokenizer.from_pretrained(ESM_HF[tag], cache_dir=str(cache_dir))
     model = EsmForMaskedLM.from_pretrained(
         ESM_HF[tag], cache_dir=str(cache_dir), use_safetensors=True
@@ -80,7 +97,7 @@ def _stream_delta(sequences, wt, tag, cache_dir=None, batch_size=32):
     from transformers import AutoTokenizer, EsmForMaskedLM
     if tag not in ESM_HF:
         raise ValueError(f"Unknown ESM tag '{tag}'. Known: {', '.join(ESM_HF)}")
-    cache_dir = cache_dir or project_cache()
+    cache_dir = _weight_cache(cache_dir)
     tokenizer = AutoTokenizer.from_pretrained(ESM_HF[tag], cache_dir=str(cache_dir))
     model = EsmForMaskedLM.from_pretrained(
         ESM_HF[tag], cache_dir=str(cache_dir), use_safetensors=True

@@ -47,6 +47,12 @@ from .run_experiment import (          # noqa: E402
 from .pipeline.paths import (PathSpec, time_grid,   # noqa: E402
                              add_arguments as add_path_arguments)
 from .pipeline.images import image_properties, load_mnist   # noqa: E402
+from .pipeline.unet import (ImageReward, UNetField,   # noqa: E402
+                            add_arguments as add_unet_arguments, conv_block)
+from .pipeline.losses import generative_loss   # noqa: E402
+from .pipeline.schedules import (make_ddpm_schedule,   # noqa: E402
+                                 add_arguments as add_schedule_arguments)
+from .pipeline.losses import add_arguments as add_objective_arguments  # noqa: E402
 from .pipeline.coupling import (add_arguments as add_coupling_arguments,  # noqa: E402
                                 columns_from_args, pair, source_for)
 
@@ -58,83 +64,18 @@ CONDITION_DROP = 0.2
 # Networks
 # ══════════════════════════════════════════════════════════════════════════════
 
-def conv_block(in_channels, out_channels):
-    return nn.Sequential(
-        nn.Conv2d(in_channels, out_channels, 3, padding=1), nn.SiLU(),
-        nn.Conv2d(out_channels, out_channels, 3, padding=1), nn.SiLU(),
-    )
-
-
-class UNetField(nn.Module):
-    """Lecture 2's MNIST U-Net, extended with a class-conditioning channel.
-
-    `predict` plays the same role as in the protein DiffusionModel: "eps" adds
-    the standard reparameterization, "x0" returns the clean-image estimate
-    directly (Lecture 3.3's AMP-Diffusion choice).
-    """
-
-    def __init__(self, base_channels=32, alpha_bars=None, predict="eps"):
-        super().__init__()
-        c = base_channels
-        self.alpha_bars = alpha_bars
-        self.K = None if alpha_bars is None else len(alpha_bars) - 1
-        self.predict = predict
-        self.condition = nn.Embedding(3, 28 * 28)     # 0, 1, and the null class
-        self.encoder1 = conv_block(3, c)              # image + time + condition
-        self.encoder2 = conv_block(c, 2 * c)
-        self.middle   = conv_block(2 * c, 4 * c)
-        self.decoder2 = conv_block(6 * c, 2 * c)
-        self.decoder1 = conv_block(3 * c, c)
-        self.output   = nn.Conv2d(c, 1, 1)
-        self.pool     = nn.MaxPool2d(2)
-
-    def trunk(self, xt, t, c):
-        time = t[:, None, None, None].expand_as(xt)
-        cond = self.condition(c).view(-1, 1, 28, 28)
-        x = torch.cat([xt, time, cond], dim=1)
-        skip1 = self.encoder1(x)
-        skip2 = self.encoder2(self.pool(skip1))
-        x = self.middle(self.pool(skip2))
-        x = F.interpolate(x, size=skip2.shape[-2:], mode="nearest")
-        x = self.decoder2(torch.cat([x, skip2], dim=1))
-        x = F.interpolate(x, size=skip1.shape[-2:], mode="nearest")
-        x = self.decoder1(torch.cat([x, skip1], dim=1))
-        return self.output(x)
-
-    def forward(self, xt, t, c):
-        raw = self.trunk(xt, t, c)
-        if self.alpha_bars is None or self.predict == "x0":
-            return raw
-        k = (t * self.K).round().long().clamp(0, self.K)
-        a = self.alpha_bars[k, None, None, None]
-        return (1 - a).sqrt() * xt + a.sqrt() * raw
-
-
-class ImageReward(nn.Module):
-    """Time-conditioned predictor of the two standardized image properties."""
-
-    def __init__(self, base_channels=32):
-        super().__init__()
-        c = base_channels
-        self.net = nn.Sequential(
-            conv_block(2, c), nn.MaxPool2d(2),
-            conv_block(c, 2 * c), nn.MaxPool2d(2),
-            conv_block(2 * c, 2 * c), nn.AdaptiveAvgPool2d(1), nn.Flatten(),
-            nn.Linear(2 * c, 2),
-        )
-
-    def forward(self, x, t):
-        time = t[:, None, None, None].expand_as(x)
-        return self.net(torch.cat([x, time], dim=1))
-
-
+# The networks moved to pipeline/unet.py, where the Lecture 2.3 -> 3.3 upgrade
+# (GroupNorm, sinusoidal step embedding per block, 7x7 attention) and the
+# `plain` control both live. Re-exported so existing imports keep working.
+PlainUNet = None
 # ══════════════════════════════════════════════════════════════════════════════
 # Training
 # ══════════════════════════════════════════════════════════════════════════════
 
 def train_flow(dataset, args):
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
-    model  = UNetField(args.channels).to(DEVICE)
+    model  = UNetField(args.channels, None, "x0", args.conditioning,
+                       args.attention and args.unet == "modern").to(DEVICE)
     reward = ImageReward(args.channels).to(DEVICE)
     opt = torch.optim.Adam(list(model.parameters()) + list(reward.parameters()),
                            lr=args.lr)
@@ -169,10 +110,13 @@ def train_flow(dataset, args):
 
 
 def train_diffusion(dataset, args):
-    betas, alphas, alpha_bars, post_vars = make_ddpm_schedule(args.diffusion_steps)
+    betas, alphas, alpha_bars, post_vars = make_ddpm_schedule(
+        args.diffusion_steps, args.beta_schedule)
     K = len(betas) - 1
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
-    model  = UNetField(args.channels, alpha_bars, args.predict).to(DEVICE)
+    model  = UNetField(args.channels, alpha_bars, args.predict,
+                       args.conditioning,
+                       args.attention and args.unet == "modern").to(DEVICE)
     reward = ImageReward(args.channels).to(DEVICE)
     opt = torch.optim.Adam(list(model.parameters()) + list(reward.parameters()),
                            lr=args.lr)
@@ -187,9 +131,13 @@ def train_diffusion(dataset, args):
             a = alpha_bars[k, None, None, None]
             eps = torch.randn_like(x0)
             xk = a.sqrt() * x0 + (1 - a).sqrt() * eps
-            dropped = c.masked_fill(torch.rand(len(c), device=DEVICE) < CONDITION_DROP, 2)
-            target = x0 if args.predict == "x0" else eps
-            loss = F.mse_loss(model(xk, t, dropped), target) + F.mse_loss(reward(xk, t), r)
+            dropped = c.masked_fill(
+                torch.rand(len(c), device=DEVICE) < CONDITION_DROP, 2)
+            # The shared loss, so the parameterization and its per-noise-level
+            # weight cannot drift out of step with the protein modality.
+            loss = (generative_loss(model(xk, t, dropped), x0, eps, xk, a,
+                                    args.predict, args.loss_weighting)
+                    + F.mse_loss(reward(xk, t), r))
             opt.zero_grad(set_to_none=True); loss.backward(); opt.step()
             if ema is not None:
                 ema.update(model)
@@ -257,10 +205,9 @@ def sample_diffusion(model, reward_model, sched, args, n, c=1, w=0.0, eta=0.0,
         a_k = alpha_bars[k]
 
         def noise_pred(state, condition):
-            out = model(state, t, condition)
-            if model.predict != "x0":
-                return out
-            return (state - a_k.sqrt() * out) / (1 - a_k).sqrt().clamp_min(1e-4)
+            # One conversion for all three parameterizations, shared with the
+            # protein sampler so "v" cannot silently be read as "eps" here.
+            return model.to_noise(model(state, t, condition), state, t)
 
         eps = noise_pred(z, null)
         if w:
@@ -271,8 +218,8 @@ def sample_diffusion(model, reward_model, sched, args, n, c=1, w=0.0, eta=0.0,
             if args.endpoint_guidance:
                 def endpoint(state, _t=t, _null=null, _a=a_k):
                     out = model(state, _t, _null)
-                    return out if model.predict == "x0" else \
-                        endpoint_from_noise(state, out, _a)
+                    return out if model.predict == "x0" else endpoint_from_noise(
+                        state, model.to_noise(out, state, _t), _a)
             eps = eps - eta * sigma * reward_gradient(
                 reward_model, z, t, lam, args.guidance_clip,
                 args.normalize_guidance, endpoint)
@@ -304,7 +251,12 @@ def parse_args():
     p.add_argument("--endpoint-guidance", action="store_true")
     p.add_argument("--normalize-guidance", action="store_true")
     p.add_argument("--guidance-clip", type=float, default=0.0)
-    p.add_argument("--predict", default="eps", choices=("eps", "x0"))
+    p.add_argument("--predict", default="x0", choices=("x0", "v", "eps"))
+    p.add_argument("--conditioning", default="binary",
+                   choices=("binary", "continuous", "none"))
+    add_unet_arguments(p)
+    add_schedule_arguments(p)
+    add_objective_arguments(p)
     p.add_argument("--ema", type=float, default=0.0)
     p.add_argument("--diffusion-steps", type=int, default=1000)
     p.add_argument("--stratified-timesteps", action="store_true")

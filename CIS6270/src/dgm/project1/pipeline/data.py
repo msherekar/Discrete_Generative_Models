@@ -13,6 +13,11 @@ from transformers import AutoTokenizer, EsmForMaskedLM
 
 from .config import AMINO_ACIDS, BATCH_SIZE, DEVICE, POLAR_RESIDUES
 
+# How many sequences to promote to float32 at once while standardizing in
+# place. 2,048 x 237 x 320 x 4 B is about 620 MB, small beside the buffer it
+# is rewriting and large enough that the loop overhead does not matter.
+_STANDARDIZE_CHUNK = 2048
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Composition proxies
 # ══════════════════════════════════════════════════════════════════════════════
@@ -29,9 +34,37 @@ def composition_proxies(sequences):
 # Data loading
 # ══════════════════════════════════════════════════════════════════════════════
 
+def choose_latent_device(n, length, dim, dtype=torch.float16, headroom=0.5):
+    """Where the latent buffer should live: the GPU when it comfortably fits.
+
+    Keeping the whole split on the GPU is what removes the training loop's host
+    bottleneck -- see training.on_gpu_batches -- but only if there is room left
+    for activations. `headroom` is the fraction of free VRAM the buffer is
+    allowed to take; the rest covers the model, its gradients, the optimizer
+    state and the largest activation.
+
+    avGFP at float16 is 6.27 GiB, which passes on an 80 GB H100 (and on the
+    128 GB unified memory of a GB10) and fails on a 12 GB card, where the
+    buffer stays on the host and the loop falls back to copying per batch.
+    """
+    if not torch.cuda.is_available():
+        return torch.device("cpu")
+    needed = n * length * dim * torch.empty((), dtype=dtype).element_size()
+    free, _ = torch.cuda.mem_get_info()
+    return DEVICE if needed < headroom * free else torch.device("cpu")
+
+
 @torch.no_grad()
 def load_data(csv_path: Path, esm_hf_id: str, cache_dir: Path,
-              max_length: int = 128, encode_batch: int = None):
+              max_length: int = 128, encode_batch: int = None,
+              store_dtype=torch.float16, store_device=None):
+    """CSV in, standardized ESM-2 latents out.
+
+    `store_dtype` and `store_device` control the latent buffer only. Pass
+    float32 to reproduce the pre-2026-10 numerics exactly, and a device to
+    force residency either way; the default None lets choose_latent_device()
+    decide from the free VRAM.
+    """
     with csv_path.open(newline="") as f:
         rows = list(csv.DictReader(f))
     sequences = [r["sequence"].strip().upper() for r in rows]
@@ -62,28 +95,94 @@ def load_data(csv_path: Path, esm_hf_id: str, cache_dir: Path,
     ).to(DEVICE).eval().requires_grad_(False)
     hidden_size = esm.config.hidden_size
     print(f"  ESM-2 hidden size: {hidden_size}  |  sequences: {len(sequences)}  |  length: {max(lengths)}")
+    if store_device is None:
+        store_device = choose_latent_device(len(sequences), max(lengths),
+                                            hidden_size, store_dtype)
 
     # The encode pass used the module-level BATCH_SIZE of 16 regardless of
     # --batch-size, so 41,372 sequences meant 2,586 tiny forward passes and a
     # CPU-bound phase with the GPU near idle. Every sequence has the same
     # length, so batching introduces no padding and changes no result.
     encode_batch = encode_batch or BATCH_SIZE
-    encoded = []
-    for start in range(0, len(sequences), encode_batch):
-        toks = tokenizer(sequences[start:start + encode_batch], return_tensors="pt")
-        toks = {k: v.to(DEVICE) for k, v in toks.items()}
-        h = esm.esm(**toks).last_hidden_state
-        encoded.append(h[:, 1:-1].cpu())
-    z = torch.cat(encoded)                         # [N, L, hidden_size]
-    z_mean = z.mean((0, 1), keepdim=True)
-    z_std  = z.std((0, 1), correction=0, keepdim=True).clamp_min(1e-4)
+    z, z_mean, z_std = _encode_latents(sequences, esm, tokenizer, hidden_size,
+                                       encode_batch, store_dtype, store_device)
     r_mean, r_std = r.mean(0), r.std(0, correction=0).clamp_min(1e-6)
-    dataset = TensorDataset((z - z_mean) / z_std, c, (r - r_mean) / r_std)
+    r_tilde = ((r - r_mean) / r_std).to(z.device)
+    dataset = TensorDataset(z, c.to(z.device), r_tilde)
     stats = {"z_mean": z_mean, "z_std": z_std, "r_mean": r_mean, "r_std": r_std,
              "r_names": names}
     print(f"  Properties: {', '.join(names)}  "
           f"(raw means {', '.join(f'{v:+.3f}' for v in r_mean.tolist())})")
     return dataset, esm, tokenizer, stats, sequences
+
+
+@torch.no_grad()
+def _encode_latents(sequences, esm, tokenizer, hidden_size, encode_batch,
+                    store_dtype, store_device):
+    """Standardized ESM-2 latents for a whole split, in two streaming passes.
+
+    This function exists because the obvious four-line version is what held
+    job 15833935 on OSPool. It was:
+
+        encoded = [...]                        # list of CPU chunks
+        z = torch.cat(encoded)                 # a second full copy
+        TensorDataset((z - z_mean) / z_std)    # a third and a fourth
+
+    with `encoded` still in scope for all of it. At avGFP's
+    41,372 x 237 x 320 each copy is 12.55 GB in float32, so the peak was about
+    50 GB of host RAM against a 60 GB request -- and the job was killed after
+    both models had finished training, during plotting, losing everything.
+
+    Here there is one buffer and one chunk live at a time:
+
+      pass 1  encode straight into a preallocated buffer, accumulating the
+              channel sums and sums of squares in float64 so the statistics do
+              not inherit the storage dtype's precision.
+      pass 2  standardize that buffer in place, one chunk at a time, promoting
+              each chunk to float32 for the arithmetic before casting back.
+
+    float16 storage halves it again to 6.27 GB, which is small enough to keep
+    resident on the GPU (see `store_device`) and skip the host-to-device copy
+    that left the GPU idling at 0% between steps. The latents are standardized
+    to roughly unit variance, so float16's ~3 decimal digits are ample; the
+    statistics themselves stay float32 because decoding multiplies by them.
+    """
+    n, length = len(sequences), len(sequences[0])
+    buffer_device = torch.device(store_device) if store_device else torch.device("cpu")
+    z = torch.empty((n, length, hidden_size), dtype=store_dtype, device=buffer_device)
+    total = torch.zeros(hidden_size, dtype=torch.float64, device=DEVICE)
+    total_sq = torch.zeros(hidden_size, dtype=torch.float64, device=DEVICE)
+
+    for start in range(0, n, encode_batch):
+        chunk = sequences[start:start + encode_batch]
+        toks = tokenizer(chunk, return_tensors="pt")
+        toks = {k: v.to(DEVICE) for k, v in toks.items()}
+        # [:, 1:-1] drops the BOS/EOS tokens ESM-2 adds, leaving one row per residue.
+        h = esm.esm(**toks).last_hidden_state[:, 1:-1]
+        flat = h.reshape(-1, hidden_size).double()
+        total += flat.sum(0)
+        total_sq += (flat * flat).sum(0)
+        z[start:start + len(chunk)] = h.to(device=buffer_device, dtype=store_dtype)
+
+    count = float(n * length)
+    mean = (total / count)
+    # Population variance, matching the correction=0 the previous code used.
+    var = (total_sq / count - mean * mean).clamp_min(0.0)
+    z_mean = mean.to(torch.float32).view(1, 1, hidden_size).cpu()
+    z_std = var.sqrt().to(torch.float32).view(1, 1, hidden_size).clamp_min(1e-4).cpu()
+
+    scale_mean = z_mean.to(buffer_device)
+    scale_std = z_std.to(buffer_device)
+    for start in range(0, n, _STANDARDIZE_CHUNK):
+        stop = min(start + _STANDARDIZE_CHUNK, n)
+        block = z[start:stop].to(torch.float32)
+        block = (block - scale_mean) / scale_std
+        z[start:stop] = block.to(store_dtype)
+
+    gigabytes = z.numel() * z.element_size() / 1024 ** 3
+    print(f"  Latents     : {tuple(z.shape)} {store_dtype} on {buffer_device} "
+          f"({gigabytes:.2f} GiB)")
+    return z, z_mean, z_std
 
 
 @torch.no_grad()

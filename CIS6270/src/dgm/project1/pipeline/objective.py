@@ -126,7 +126,7 @@ class Objective:
         return text
 
 
-def weight_vector(lambdas, objective=None):
+def weight_vector(lambdas, objective=None, n_props=None):
     """Tradeoff weights on the simplex, one per scalarized objective.
 
     Lecture 3.4 requires nonnegative weights summing to one, so the mix is a
@@ -134,8 +134,15 @@ def weight_vector(lambdas, objective=None):
     A shorter list is zero-padded, which is what lets the default lambdas=(1, 0)
     keep working when a third property is present but constrained rather than
     scalarized.
+
+    `n_props` is how many columns the reward head actually emits, and is used
+    when there is no Objective to say. Without it the default lambdas=(1, 0)
+    silently defines a 2-vector against a 3-column head, which broadcasts to a
+    shape error deep inside the guidance backward pass rather than anywhere a
+    caller can see.
     """
-    n = len(lambdas) if objective is None else objective.n_obj
+    n = (objective.n_obj if objective is not None
+         else max(len(lambdas), n_props or 0))
     values = list(lambdas[:n]) + [0.0] * max(0, n - len(lambdas))
     if len(lambdas) > n:
         raise ValueError(f"Got {len(lambdas)} lambdas for {n} objectives: {lambdas}")

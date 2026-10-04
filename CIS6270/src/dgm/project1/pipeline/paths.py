@@ -7,31 +7,11 @@ estimators invert them.
 import torch
 
 from .config import DEVICE
-
-def sample_timesteps(n, K, device, stratified=False):
-    """Diffusion steps for one minibatch.
-
-    Independent uniform draws leave most of the schedule unvisited in a small
-    batch: at K=1000 and batch 16, one batch touches 1.6% of it. Stratified
-    sampling puts one draw in each of n equal bins, so every batch spans the
-    whole schedule and the gradient carries less variance.
-    """
-    if not stratified:
-        return torch.randint(1, K + 1, (n,), device=device)
-    edges = torch.arange(n, device=device, dtype=torch.float32)
-    k = ((edges + torch.rand(n, device=device)) / n * K).long().clamp(1, K)
-    return k[torch.randperm(n, device=device)]
-
-
-def make_ddpm_schedule(K=1000):
-    # Fewer steps means each minibatch covers more of the schedule.
-    betas      = torch.cat([torch.zeros(1), torch.linspace(1e-4, 0.02, K)]).to(DEVICE)
-    alphas     = 1.0 - betas
-    alpha_bars = alphas.cumprod(0)
-    previous   = torch.cat([torch.ones(1, device=DEVICE), alpha_bars[:-1]])
-    post_vars  = betas * (1 - previous) / (1 - alpha_bars).clamp_min(1e-20)
-    return betas, alphas, alpha_bars, post_vars
-
+# Re-exported: the diffusion forward process moved to schedules.py when the
+# cosine and sigmoid variants were added, but every call site imports it from
+# here and saved run configs name it here.
+from .schedules import (BETA_SCHEDULES, make_ddpm_schedule,  # noqa: F401
+                        sample_timesteps)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -63,7 +43,12 @@ def make_ddpm_schedule(K=1000):
 # between `linear` and `quadratic` cannot be attributed to either.
 
 GEOMETRIES = ("segment", "arc", "data-arc")
-SCHEDULES = ("linear", "quadratic", "cosine")
+SCHEDULES = ("linear", "quadratic", "cosine", "hermite", "smoothstep")
+
+# Endpoint tangent for the "hermite" schedule, as a fraction of the chord.
+# 0.5 halves the endpoint speed rather than stalling it, which keeps the
+# endpoint estimator away from the ds/dt clamp that `smoothstep` hits.
+HERMITE_TENSION = 0.5
 
 # The names this module accepted before geometry and schedule were separated.
 LEGACY_INTERPOLANTS = {
@@ -108,7 +93,40 @@ def _schedule(t, kind):
         # The mirror image: fast at first, decelerating onto the data.
         half_pi = torch.pi / 2
         return torch.sin(half_pi * t), half_pi * torch.cos(half_pi * t)
+    if kind in ("hermite", "smoothstep"):
+        return _hermite(t, HERMITE_TENSION if kind == "hermite" else 0.0)
     raise ValueError(f"unknown schedule '{kind}'")
+
+
+def _hermite(t, tension):
+    """Cubic-Hermite reparameterization of the path parameter.
+
+    Lecture 2.2 presents CHIME's cubic-Hermite interpolant with the note
+    "Worked better than base methods!", so it belongs in the Axis A grid. The
+    two-point Hermite form with both endpoint tangents set to `tension` times
+    the chord reduces, for any geometry whose coefficients sum to one, to a
+    reparameterization of s:
+
+        s(t) = tension * t + (1 - tension) * (3t^2 - 2t^3)
+
+    which is worth seeing explicitly, because it means CHIME on a straight
+    segment is a SCHEDULE change and not a new geometry -- the same conflation
+    this module's header untangles for `quadratic`. It cannot move the terminal
+    marginal in the exact-ODE limit; what it changes is where a fixed-step
+    integrator spends its steps and which noise levels training samples.
+
+      tension = 1   recovers the linear schedule exactly.
+      tension = 0   the smoothstep, whose velocity vanishes at both ends, so
+                    steps bunch in the middle where the velocity field is
+                    hardest to learn (Lecture 2.2's crossing-path argument).
+
+    ds/dt = tension at both endpoints, so tension also sets how singular the
+    endpoint estimator gets; see endpoint_from_velocity's clamp.
+    """
+    smooth, d_smooth = 3 * t ** 2 - 2 * t ** 3, 6 * t - 6 * t ** 2
+    s = tension * t + (1 - tension) * smooth
+    ds = tension + (1 - tension) * d_smooth
+    return s, ds
 
 
 def _geometry(s, kind, scale=1.0):

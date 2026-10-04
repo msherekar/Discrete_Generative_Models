@@ -146,10 +146,15 @@ def _resolve_anchor(args, parser, reference, source, esm, tokenizer, stats):
 
 def prepare_run(args, parser, model_info, cache_dir) -> RunSetup:
     """Encode the dataset and settle every pre-training choice."""
+    # Imported here rather than at module scope: wiring imports sampling,
+    # which imports this module's siblings, and a top-level import would close
+    # the cycle.
+    from .wiring import latent_kwargs
     print("\nEncoding sequences with ESM-2...")
     dataset, esm, tokenizer, stats, sequences = load_data(
         args.dataset, model_info["hf_id"], cache_dir, args.max_length,
         encode_batch=getattr(args, "encode_batch", None) or args.batch_size,
+        **latent_kwargs(args),
     )
     _, length, dim = dataset.tensors[0].shape
 

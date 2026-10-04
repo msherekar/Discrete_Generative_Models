@@ -45,6 +45,41 @@ def charge(seq):
     return (sum(a in "KR" for a in seq) - sum(a in "DE" for a in seq)) / len(seq)
 
 
+def nfe_for(run_dir, method, steps):
+    """Network forward passes this run actually spent, from its saved config.
+
+    The cost unit the matched protocol is defined on. Read from the run rather
+    than assumed, because the same `steps` means different costs depending on
+    the solver (Heun evaluates twice per step), on whether classifier-free
+    guidance was on (two branches), and on whether the diffusion chain was
+    ancestral (all K levels, ignoring `steps` entirely).
+    """
+    from dgm.project1.pipeline.solvers import expected_nfe
+    try:
+        results = torch.load(run_dir / method / "results.pt", map_location="cpu",
+                             weights_only=False)
+        config = results.get("config", {}) or {}
+    except Exception:
+        config = {}
+    if method == "diffusion":
+        solver = config.get("diffusion_solver", "ddpm")
+        if solver == "ddpm":
+            # The ancestral chain walks every level whatever --steps says.
+            return float(config.get("diffusion_steps", 1000))
+        steps = config.get("sample_steps") or steps
+        per_step = 2 if solver == "heun" else 1
+    else:
+        solver = config.get("flow_solver", "euler")
+        steps = config.get("steps", steps)
+        per_step = 1
+        return float(expected_nfe(int(steps), solver,
+                                  cfg=bool(config.get("cfg_weight")),
+                                  endpoint=bool(config.get("endpoint_guidance")),
+                                  guided=bool(config.get("reward_eta"))))
+    cfg = 2 if config.get("cfg_weight") else 1
+    return float(int(steps) * per_step * cfg)
+
+
 def load_run(run_dir, method):
     """Return {mode: property array} and the per-epoch losses, or None."""
     protein = run_dir / method / "results.pt"
@@ -152,13 +187,17 @@ def main():
     p.add_argument("--outputs", type=Path, default=ROOT / "outputs")
     p.add_argument("--variants", nargs="+", default=["st", "ep"])
     p.add_argument("--etas", type=float, nargs="+", default=[1, 5, 20, 50])
-    p.add_argument("--x-axis", default="eta", choices=("eta", "steps"),
+    p.add_argument("--x-axis", default="eta", choices=("eta", "steps", "nfe"),
                    help="What the run-directory level means and what the figure "
                         "plots against (default: eta). 'steps' is the axis a "
                         "coupling claim lives on: couplings reach the same "
                         "marginal given enough integration steps and differ in "
                         "how few they need, so quality at a fixed 200 steps is "
-                        "the one measurement that cannot show the effect.")
+                        "the one measurement that cannot show the effect. "
+                        "'nfe' is network forward passes, the only unit on "
+                        "which flow and diffusion are comparable at all -- "
+                        "Lecture 2.1: 'every velocity evaluation requires a "
+                        "neural-network evaluation'.")
     p.add_argument("--steps", type=int, nargs="+", default=[10, 20, 50, 200],
                    help="Integration-step levels, used when --x-axis steps.")
     p.add_argument("--seeds", type=int, nargs="+", default=[11, 12, 13, 14, 15])
@@ -178,15 +217,19 @@ def main():
     # One level list drives the directory names, the table and the x axis, so a
     # second axis costs a name and a label rather than a parallel code path.
     levels = [float(v) for v in
-              (args.steps if args.x_axis == "steps" else args.etas)]
-    x_label = ("integration steps" if args.x_axis == "steps"
-               else "guidance strength eta")
+              (args.steps if args.x_axis in ("steps", "nfe") else args.etas)]
+    x_label = {"steps": "integration steps",
+               "nfe": "network forward passes (NFE)",
+               "eta": "guidance strength eta"}[args.x_axis]
 
     if args.x_axis == "steps" and "diffusion" in args.methods:
+        # The old behaviour, and still correct for runs made with
+        # --diffusion-solver ddpm: the ancestral chain walks all K levels
+        # whatever --steps says, so its runs at every level are the same run.
         print("  [skip] diffusion on a steps axis: --steps drives the FLOW "
-              "integrator only. The reverse chain walks K=--diffusion-steps, so "
-              "its runs at every level are the same run, and a coupling is flow-"
-              "only besides. Reporting flow alone.")
+              "integrator only when the reverse chain is ancestral DDPM. "
+              "Re-run the sweep with --diffusion-solver ddim and plot "
+              "--x-axis nfe to compare the two methods at matched cost.")
         args.methods = [m for m in args.methods if m != "diffusion"] or ["flow"]
 
     rows, modality, missing = [], None, []
@@ -207,7 +250,9 @@ def main():
                         reference[method] = reference_property(
                             modality, d, method, args.data_dir)
                     row = {"method": method, "variant": v, "eta": e,
-                           "level": e, "x_axis": args.x_axis, "seed": s,
+                           "level": nfe_for(d, method, e) if args.x_axis == "nfe"
+                                    else e,
+                           "x_axis": args.x_axis, "seed": s,
                            "gain": props["single"].mean() - props["cfg"].mean(),
                            "unguided": props["cfg"].mean(),
                            "guided": props["single"].mean(),
@@ -230,7 +275,7 @@ def main():
     label = "net charge" if modality == "protein" else "mean intensity (ink)"
     # On a steps axis the study is about reproducing the data, not about
     # guidance, so the reported quantity changes with the axis.
-    metric = "w1" if args.x_axis == "steps" else "gain"
+    metric = "w1" if args.x_axis in ("steps", "nfe") else "gain"
     y_label = (f"W1({label}) to the data, in sds  [lower is better]"
                if metric == "w1" else f"guidance gain in {label}")
     if metric == "gain" and all(r["gain"] == 0 for r in rows):

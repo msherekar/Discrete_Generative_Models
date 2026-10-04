@@ -72,7 +72,14 @@ def resolve_oracle(args, length):
         print(f"  [skip] oracle was fitted on a {len(oracle[2])}-residue protein but "
               f"these sequences are {length}; not scoring")
         return None, None
-    if oracle is None and not args.no_oracle and oracle_path is not None:
-        print("  No brightness oracle loaded; samples will not be scored. "
-              "Fit one with: dgm-embedding-oracle --fit --backend metl")
+    if oracle is None and not args.no_oracle:
+        # Say so even when oracle_path is None. Previously that case returned
+        # silently, so a job launched with scoring ON but no oracle file staged
+        # looked exactly like a successful run and produced no brightness
+        # column -- the failure only showed up much later, as a missing table.
+        where = oracle_path or f"{default_oracle} (default)"
+        print(f"  [warn] scoring was requested but no brightness oracle loaded "
+              f"from {where}; samples will NOT be scored. Pass --oracle "
+              f"<file.npz>, or fit one with: "
+              f"dgm-embedding-oracle --fit --backend metl")
     return oracle, oracle_path

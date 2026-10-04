@@ -128,7 +128,15 @@ def _collapse_warning(runs):
 def oracle_summary(args, setup, arms, flow_latents, diff_latents,
                    oracle_path, out_root):
     """The full post-run comparison, printed only when an oracle scored samples."""
-    runs = (("flow", flow_latents), ("diffusion", diff_latents))
+    # Drop whichever modality this job did not run. With one method per OSG
+    # job (--only), half of these are None, and a None would otherwise reach
+    # the table builders as if it were a set of latents.
+    runs = tuple((name, latents)
+                 for name, latents in (("flow", flow_latents),
+                                       ("diffusion", diff_latents))
+                 if latents is not None)
+    if not runs:
+        return
     reference = setup.reference
     _brightness_table(runs, reference)
     if args.reward_lambda and reference is not None:
