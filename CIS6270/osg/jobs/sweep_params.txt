@@ -1,5 +1,2 @@
-# ── flow, NFE 10/20/50/100/200 x seeds 11-15 ─────────────────────────────────
 gfp_base_f010_s11, flow, 11, 250, 256, 256, continuous, adaln, x0, cosine, min-snr, segment, linear, independent, euler, ddim, 10, score, -2.418182, 0.999, 500, 1000
-
-# ── diffusion, same NFE grid and seeds ───────────────────────────────────────
 gfp_base_d010_s11, diffusion, 11, 150, 256, 256, continuous, adaln, x0, cosine, min-snr, segment, linear, independent, euler, ddim, 10, score, -2.418182, 0.999, 500, 1000
