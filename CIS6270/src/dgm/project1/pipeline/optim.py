@@ -235,3 +235,44 @@ def scale_lr_for_batch(lr, batch_size, reference=128):
     training for fewer, unchanged-size steps.
     """
     return lr * (batch_size / reference)
+
+
+if __name__ == "__main__":
+    import torch
+    from torch.utils.data import TensorDataset
+    from .nets import FlowModel, RewardModel
+
+    B, L, D, H = 32, 8, 16, 32
+    z = torch.randn(B, L, D)
+    c = torch.randint(0, 2, (B,))
+    r = torch.randn(B, 2)
+
+    # Batches: iterates without crash, yields (z, c, r) tuples.
+    dataset = TensorDataset(z, c, r)
+    batches = Batches(dataset, batch_size=8)
+    count = sum(1 for _ in batches)
+    assert count == B // 8, f"expected {B // 8} batches, got {count}"
+    print(f"  Batches: {count} batches of 8 from {B} samples")
+
+    # build_optimizer: single optimizer wrapping both parameter groups.
+    field = FlowModel(L, D, H, arch="mlp", conditioning="binary")
+    reward = RewardModel(L, D, H, arch="mlp", n_props=2)
+    opt = build_optimizer(field, reward, lr=1e-3, reward_lr=1e-4)
+    assert len(opt.param_groups) == 2
+    print(f"  build_optimizer: {len(opt.param_groups)} param groups  "
+          f"lr={[g['lr'] for g in opt.param_groups]}")
+
+    # warmup_cosine: LR starts at 0, peaks, then decays.
+    sched = warmup_cosine(opt, total_steps=100, warmup_steps=10)
+    lrs = []
+    for _ in range(100):
+        sched.step()
+        lrs.append(opt.param_groups[0]["lr"])
+    print(f"  warmup_cosine: lr[0]={lrs[0]:.6f}  lr[10]={lrs[9]:.6f}  lr[-1]={lrs[-1]:.6f}")
+
+    # scale_lr_for_batch.
+    scaled = scale_lr_for_batch(1e-3, 256, reference=128)
+    assert abs(scaled - 2e-3) < 1e-9
+    print(f"  scale_lr_for_batch(1e-3, 256): {scaled:.4e}")
+
+    print("optim.py OK")

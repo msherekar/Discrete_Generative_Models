@@ -248,3 +248,31 @@ def decode_budget(z, esm, tokenizer, stats, reference, budget,
         decoded.scatter_(1, positions, drawn.gather(1, positions))
 
     return ["".join(AMINO_ACIDS[i] for i in row) for row in decoded.cpu().tolist()]
+
+
+if __name__ == "__main__":
+    import torch, tempfile, pathlib, csv
+    from .config import AMINO_ACIDS
+    AA = AMINO_ACIDS
+
+    # load_support_mask with a CSV of sequences (no ESM needed).
+    wt = "ACDEFGHIKLMN"   # length 12
+    # Sequences with specific substitutions: pos0 A→E, pos1 C→K, pos2 D→R.
+    seqs_csv = [wt, "ECDEFGHIKLMN", "AKDEFGHIKLMN", "ACREFGHIKLMN"]
+    with tempfile.TemporaryDirectory() as tmp:
+        p = pathlib.Path(tmp) / "variants.csv"
+        with p.open("w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["sequence"])
+            w.writeheader()
+            for s in seqs_csv:
+                w.writerow({"sequence": s})
+        mask = load_support_mask(p, wt, level="substitution")
+    assert mask.shape == (len(wt), len(AA)), f"mask shape {mask.shape}"
+    # position 0 residue E should be True (from "ECDEFGHIKLMN").
+    assert mask[0, AA.index('E')], "pos0 E not in support"
+    print(f"  support mask shape: {mask.shape}  pos0[E]={mask[0, AA.index('E')]}")
+
+    # decode requires ESM + tokenizer -- skip the full decode, just verify
+    # decode_budgeted can be called once a support mask is built.
+    print(f"  load_support_mask: OK  (decode itself needs ESM tokenizer, skipped)")
+    print("decoding.py OK")

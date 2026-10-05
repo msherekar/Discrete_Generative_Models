@@ -70,3 +70,10 @@ def build_run_config(args, setup, spec, oracle_path, path=None) -> dict:
         "sample_seed":     args.sample_seed,
         "oracle":          str(oracle_path) if oracle_path else None,
     }
+
+
+if __name__ == "__main__":
+    # build_run_config requires a full args namespace; just verify import is clean.
+    print(f"  runconfig.py imports OK")
+    print(f"  build_run_config is callable: {callable(build_run_config)}")
+    print("runconfig.py OK")

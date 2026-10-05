@@ -381,3 +381,39 @@ def add_arguments(parser):
     parser.add_argument("--path-scale", type=float, default=0.0, metavar="S",
                         help="Data standard deviation for --path-geometry data-arc "
                              "(default: 0 = measure it from the training set).")
+
+
+if __name__ == "__main__":
+    import torch
+    B, L, D = 4, 8, 16
+    z0 = torch.randn(B, L, D)
+    z1 = torch.randn(B, L, D)
+    t = torch.rand(B)
+
+    # Each geometry x schedule interpolates without NaN.
+    for geom in GEOMETRIES:
+        for sched in SCHEDULES:
+            zt, target = interpolate(z0, z1, t, geometry=geom, schedule=sched)
+            assert zt.isfinite().all(), f"{geom}/{sched}: zt has NaN"
+            assert target.isfinite().all(), f"{geom}/{sched}: target has NaN"
+        print(f"  {geom}: interpolate OK")
+
+    # Endpoint recovery: from velocity at t, reconstruct z1 within tolerance.
+    zt, v = interpolate(z0, z1, t, geometry="segment", schedule="linear")
+    z1_hat = endpoint_from_velocity(zt, t, v, geometry="segment", schedule="linear")
+    err = (z1_hat - z1).abs().max().item()
+    assert err < 1e-4, f"endpoint recovery error {err}"
+    print(f"  endpoint_from_velocity: max err={err:.2e}")
+
+    # PathSpec defaults work.
+    spec = PathSpec()
+    zt2, v2 = interpolate(z0, z1, t, **spec.kwargs)
+    assert zt2.isfinite().all()
+    print(f"  PathSpec default: geometry={spec.geometry} schedule={spec.schedule}")
+
+    # DDPM schedule is re-exported.
+    betas, _, abars, _ = make_ddpm_schedule(100)
+    assert abars[0] > 0.99
+    print(f"  make_ddpm_schedule(100): abar[0]={abars[0]:.4f}")
+
+    print("paths.py OK")

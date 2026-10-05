@@ -88,3 +88,15 @@ def chdir(path: Path):
         yield
     finally:
         os.chdir(previous)
+
+
+if __name__ == "__main__":
+    # seq_to_variant: 1-indexed, _wt for identical sequence.
+    wt = "ACDEFG"
+    assert seq_to_variant(wt, wt) == "_wt"
+    assert seq_to_variant("ECDEFG", wt) == "A1E"
+    assert seq_to_variant("ECDEFK", wt) == "A1E,G6K"
+    print(f"  seq_to_variant(_wt): {seq_to_variant(wt, wt)}")
+    print(f"  seq_to_variant(A1E): {seq_to_variant('ECDEFG', wt)}")
+    print(f"  seq_to_variant(A1E,G6K): {seq_to_variant('ECDEFK', wt)}")
+    print("oracles/common.py OK")

@@ -136,3 +136,14 @@ def encode(sequences: list[str], wt: str, backend: str, projection=None,
             raise ValueError(f"backend '{backend}' needs its saved PCA projection")
         return encode_esm_pca(sequences, wt, tag, projection, **kwargs)
     return encode_esm(sequences, wt, backend, **kwargs)
+
+
+if __name__ == "__main__":
+    # parse_backend: all valid strings parse without error.
+    for backend in ("indicator", "esm2_8m", "esm2_35m:64"):
+        tag, k = parse_backend(backend)
+        print(f"  parse_backend({backend!r}): tag={tag!r}  k={k}")
+
+    # encode requires ESM weights; confirm the encode() import path is callable.
+    print(f"  encode is callable: {callable(encode)}")
+    print("oracles/encoders.py OK")

@@ -310,3 +310,21 @@ def build_parser(description=None):
     parser.add_argument("--list-models", action="store_true",
                         help="Print all known ESM-2 models and exit.")
     return parser
+
+
+if __name__ == "__main__":
+    # Confirm the parser builds without error and key flags exist.
+    p = build_parser()
+    args = p.parse_args([
+        "--dataset", "data/avgfp_train.csv",
+        "--esm-model", "esm2_8m",
+        "--max-length", "237",
+    ])
+    assert args.esm_model == "esm2_8m"
+    assert args.max_length == 237
+    flags = [a.dest for a in p._actions]
+    for expected in ("epochs", "steps", "coupling", "arch", "predict"):
+        assert expected in flags, f"missing flag: {expected}"
+    print(f"  build_parser: {len(flags)} flags registered")
+    print(f"  sample args: esm_model={args.esm_model}  max_length={args.max_length}")
+    print("cli.py OK")

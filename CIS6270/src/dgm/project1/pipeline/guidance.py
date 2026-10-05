@@ -208,3 +208,42 @@ def reward_gradient(reward_model, z, t, lambdas, clip=0.0, normalize=False,
         scale = (clip / norm.clamp_min(1e-12)).clamp(max=1.0)
         grad = grad * scale.view(-1, *([1] * (grad.dim() - 1)))
     return grad
+
+
+if __name__ == "__main__":
+    import torch
+
+    # score_to_velocity is finite and non-negative for t in (0,1).
+    t_vals = torch.linspace(0.05, 0.95, 10)
+    for geom in ("segment", "arc"):
+        scales = torch.tensor([score_to_velocity(torch.tensor(ti), {"geometry": geom})
+                                for ti in t_vals])
+        assert (scales > 0).all() and scales.isfinite().all(), \
+            f"{geom}: score_to_velocity not positive/finite"
+        print(f"  score_to_velocity({geom}): min={scales.min():.3f}  max={scales.max():.3f}")
+
+    # reward_gradient: gradient flows and is finite.
+    # Run entirely on CPU so weight_vector's DEVICE doesn't mismatch tensors.
+    B, L, D = 4, 8, 16
+    cpu = torch.device("cpu")
+    z = torch.randn(B, L, D, device=cpu)
+    t = torch.full((B,), 0.5, device=cpu)
+
+    from .nets import RewardModel
+    from .objective import Objective, weight_vector
+    reward = RewardModel(L, D, 32, "mlp", n_props=2).to(cpu)
+    obj = Objective(n_props=2, setpoint=1.0, senses=(1.0, 1.0))
+    lam = weight_vector([1.0, 0.0]).to(cpu)
+
+    grad = reward_gradient(reward, z, t, lam, clip=0.0, normalize=False,
+                           endpoint=None, objective=obj)
+    assert grad.shape == (B, L, D) and grad.isfinite().all()
+    print(f"  reward_gradient: shape={grad.shape}  norm={grad.norm():.3f}")
+
+    # reward_gradient with clip: per-sample norms bounded.
+    grad_c = reward_gradient(reward, z, t, lam, clip=1.0)
+    norms = grad_c.flatten(1).norm(dim=1)
+    assert (norms <= 1.0 + 1e-5).all(), f"clip failed: max norm={norms.max():.3f}"
+    print(f"  reward_gradient(clip=1): max norm={norms.max():.4f}")
+
+    print("guidance.py OK")

@@ -153,3 +153,46 @@ def weight_vector(lambdas, objective=None, n_props=None):
     if float(total) <= 0:
         raise ValueError(f"lambdas must not be all zero, got {lambdas}")
     return lam / total
+
+
+if __name__ == "__main__":
+    import torch
+    B = 8
+    r = torch.randn(B, 2)   # [brightness, stability]
+    setpoint = 1.0           # target for property 0 (brightness), standardized
+
+    # Objective.terms: shape [B, n_obj], finite.
+    obj = Objective(n_props=2, setpoint=setpoint, senses=(1.0, 1.0))
+    val = obj.terms(r)
+    assert val.shape == (B, 2) and val.isfinite().all(), \
+        f"Objective.terms bad: shape={val.shape}"
+    print(f"  Objective.terms: shape={val.shape}  first row={val[0].tolist()}")
+
+    # Objective.term_scale: shape [B], finite.
+    scale = obj.term_scale(r, 0)
+    assert scale.shape == (B,) and scale.isfinite().all()
+    print(f"  Objective.term_scale(j=0): {scale[:4].tolist()}")
+
+    # Objective with constraint: penalty kicks in above threshold.
+    obj_c = Objective(n_props=2, setpoint=setpoint,
+                      constraint_index=1, constraint_threshold=0.0, rho=1.0)
+    terms_c = obj_c.terms(r)   # n_obj = 1 (only property 0)
+    pen_c   = obj_c.penalty(r)
+    assert terms_c.shape == (B, 1) and terms_c.isfinite().all()
+    assert pen_c.shape == (B,) and (pen_c >= 0).all()
+    print(f"  Objective+constraint terms shape={terms_c.shape}  "
+          f"penalty max={pen_c.max():.3f}")
+
+    # weight_vector: sums to 1, all positive.
+    lam = weight_vector([3.0, 1.0])
+    assert abs(lam.sum().item() - 1.0) < 1e-6
+    assert (lam > 0).all()
+    print(f"  weight_vector([3,1]): {lam.tolist()}")
+
+    # reward_loss with censored floor: finite scalar.
+    from .losses import reward_loss
+    rl = reward_loss(r, r, censor_floor=-2.418)
+    assert rl.isfinite(), f"reward_loss with censor floor not finite"
+    print(f"  reward_loss(censored): {rl.item():.4f}")
+
+    print("objective.py OK")

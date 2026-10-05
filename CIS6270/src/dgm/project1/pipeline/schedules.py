@@ -157,3 +157,19 @@ def describe(K=1000, kind="linear"):
     tail = float((alpha_bars < 1e-3).float().mean())
     return (f"{kind}: abar=0.5 at step {half}/{K}, "
             f"{100 * tail:.0f}% of steps below abar=1e-3")
+
+
+if __name__ == "__main__":
+    # Smoke-test all three beta schedules and step sampling.
+    import torch
+    for sched in BETA_SCHEDULES:
+        betas, alphas, abars, post_vars = make_ddpm_schedule(1000, sched)
+        assert abars[0] > 0.99 and abars[-1] < 0.01, f"{sched}: abar range wrong"
+        assert (abars[:-1] >= abars[1:]).all(), f"{sched}: abars not monotone"
+        print(f"  {sched:8s}: abar[0]={abars[0]:.4f}  abar[-1]={abars[-1]:.6f}  "
+              f"abar=0.5 at step {int((abars < 0.5).nonzero()[0])}")
+    # Stratified sampling covers the whole range.
+    k = sample_timesteps(1000, 1000, torch.device("cpu"), stratified=True)
+    assert k.min() >= 1 and k.max() <= 1000
+    print(f"  stratified k: min={k.min()}  max={k.max()}  unique={k.unique().numel()}/1000")
+    print("schedules.py OK")

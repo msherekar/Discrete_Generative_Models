@@ -265,3 +265,38 @@ def sample_diffusion(model, reward_model, alpha_bars, betas, alphas, post_vars,
 
             z = langevin_correct(z, t_next, score, corrector_steps, corrector_snr)
     return (z, int(nfe)) if return_nfe else z
+
+
+if __name__ == "__main__":
+    import torch
+    from torch.utils.data import TensorDataset
+    from .nets import FlowModel, DiffusionModel, RewardModel
+    from .schedules import make_ddpm_schedule
+
+    from .config import DEVICE
+    B, L, D, H = 4, 8, 16, 32
+    _, alphas, abars, pvars = make_ddpm_schedule(50)
+
+    fm = FlowModel(L, D, H, arch="mlp", conditioning="binary").to(DEVICE).eval()
+    dm = DiffusionModel(L, D, abars, H, arch="mlp", predict="x0",
+                        conditioning="binary").to(DEVICE).eval()
+    rm = RewardModel(L, D, H, arch="mlp", n_props=2).to(DEVICE).eval()
+
+    # sample_flow: returns [B, L, D].
+    z_flow = sample_flow(fm, rm, n=B, length=L, dim=D, steps=5, eta=0.0)
+    assert z_flow.shape == (B, L, D) and z_flow.isfinite().all()
+    print(f"  sample_flow(eta=0): shape={z_flow.shape}")
+
+    # sample_flow with guidance.
+    z_guided = sample_flow(fm, rm, n=B, length=L, dim=D, steps=5, eta=1.0)
+    assert z_guided.shape == (B, L, D) and z_guided.isfinite().all()
+    print(f"  sample_flow(eta=1): shape={z_guided.shape}")
+
+    # sample_diffusion: DDIM to 5 steps.
+    z_diff = sample_diffusion(dm, rm, abars, alphas.new_zeros(51),
+                              alphas, pvars,
+                              n=B, steps=5, eta=0.0, solver="ddim")
+    assert z_diff.shape == (B, L, D) and z_diff.isfinite().all()
+    print(f"  sample_diffusion(ddim, eta=0): shape={z_diff.shape}")
+
+    print("sampling.py OK")

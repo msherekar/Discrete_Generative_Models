@@ -276,3 +276,33 @@ def pair_distance(z0, z1):
     """Mean per-pair squared distance, normalized by dimension."""
     d = z0.flatten(1).shape[1]
     return float((z1 - z0).flatten(1).pow(2).sum(1).mean() / d)
+
+
+if __name__ == "__main__":
+    import torch
+    B, L, D = 16, 8, 32
+    z0 = torch.randn(B, L, D)
+    z1 = torch.randn(B, L, D)
+    aux = torch.randn(B, 2)
+
+    for kind in KINDS:
+        perm = couple(z0, z1, kind=kind, aux=aux)
+        assert perm.shape == (B,), f"{kind}: perm shape wrong {perm.shape}"
+        assert perm.min() >= 0 and perm.max() < B, f"{kind}: out-of-range indices"
+        # Identity kinds must return identity permutation.
+        if kind in ("independent", "informed", "informed-shuffled", "scaled"):
+            assert (perm == torch.arange(B)).all(), f"{kind}: expected identity permutation"
+        print(f"  couple({kind}): {perm.tolist()[:4]}...")
+
+    # pair() calls couple() and re-indexes z0.
+    z0_paired = pair(z0, z1, "ot", aux=aux)
+    assert z0_paired.shape == z0.shape
+    print(f"  pair(ot): shape={z0_paired.shape}")
+
+    # InformedSource round-trip: draw returns correct shape.
+    src = source_for("informed", z1, aux)
+    sample = src.draw(n=8, device=z1.device)
+    assert sample.shape == (8, L, D), f"draw shape {sample.shape}"
+    print(f"  InformedSource.draw: shape={sample.shape}")
+
+    print("coupling.py OK")

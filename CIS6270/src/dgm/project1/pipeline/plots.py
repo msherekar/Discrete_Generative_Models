@@ -87,3 +87,10 @@ def generate_plots(args, setup, flow, diff, run_tag, path=None):
     n_png = len(list(plot_dir.glob("*.png")))
     n_csv = len(list(plot_dir.glob("*.csv")))
     print(f"\n{n_png} plots + {n_csv} CSV files saved to {plot_dir}/")
+
+
+if __name__ == "__main__":
+    # generate_plots needs trained models + a real RunSetup; confirm import.
+    print(f"  generate_plots callable: {callable(generate_plots)}")
+    print(f"  _plot_payload callable:  {callable(_plot_payload)}")
+    print("plots.py OK")

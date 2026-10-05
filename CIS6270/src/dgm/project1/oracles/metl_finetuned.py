@@ -150,3 +150,19 @@ def add_arguments(parser):
                             "the same forward pass -- no Rosetta run, which "
                             "would be 135-215 s per variant.")
     return parser
+
+
+if __name__ == "__main__":
+    print(f"  metl-pretrained available: {available()}")
+    print(f"  Known target UUIDs: {METL_TARGET_UUIDS}")
+    print(f"  CACHE_DIR: {CACHE_DIR}")
+    if available():
+        wt_seq = "ACDEFGHIKLMNPQRSTVWY"[:10]
+        try:
+            preds = score(["A1E"], wt_seq, kind="ft-1d")
+            print(f"  score(['A1E'], kind='ft-1d'): {preds}")
+        except Exception as e:
+            print(f"  score: {type(e).__name__}: {e} (model weights may not be cached)")
+    else:
+        print("  metl-pretrained not installed — pip install metl-pretrained to enable")
+    print("oracles/metl_finetuned.py OK")

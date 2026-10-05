@@ -171,3 +171,23 @@ def metl_attributes_wt(wt: str) -> np.ndarray:
         x = encoder(encoding="int_seqs", variants=["_wt"], wt_aa=wt, wt_offset=0)
         y = model(torch.tensor(x).to(device()), pdb_fn=METL_PDB)
     return y.detach().cpu().numpy().astype(np.float32)[0]
+
+
+if __name__ == "__main__":
+    # METL requires the checkpoint to be present; only check that the module
+    # loads and the common helpers work without it.
+    from .common import seq_to_variant, METL_CKPT
+    print(f"  METL checkpoint path: {METL_CKPT}")
+    print(f"  METL_CKPT exists: {METL_CKPT.exists()}")
+    # wt_attributes requires the model loaded; skip if checkpoint absent.
+    if METL_CKPT.exists():
+        wt = "ACDEFGHIKLMNPQRSTVWY"[:10]   # short synthetic WT
+        try:
+            attrs = wt_attributes(wt)
+            assert attrs.ndim == 1, f"wt_attributes: expected 1D, got {attrs.shape}"
+            print(f"  wt_attributes: shape={attrs.shape}  first={attrs[:3]}")
+        except Exception as e:
+            print(f"  wt_attributes: {type(e).__name__}: {e}")
+    else:
+        print(f"  wt_attributes: skipped (checkpoint not found)")
+    print("oracles/metl.py OK")

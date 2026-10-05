@@ -40,3 +40,16 @@ def load_mnist(limit, data_dir):
     c = (props[:, 0] > props[:, 0].median()).long()
     mean, std = props.mean(0), props.std(0, correction=0).clamp_min(1e-6)
     return TensorDataset(x, c, (props - mean) / std), {"mean": mean, "std": std}
+
+
+if __name__ == "__main__":
+    import torch
+    B = 8
+    # Synthetic 28x28 images in [-1, 1].
+    x = torch.randn(B, 1, 28, 28).clamp(-1, 1)
+    props = image_properties(x)
+    assert props.shape == (B, 2) and props.isfinite().all()
+    print(f"  image_properties: shape={props.shape}")
+    print(f"  ink range: [{props[:, 0].min():.3f}, {props[:, 0].max():.3f}]")
+    print(f"  symmetry range: [{props[:, 1].min():.3f}, {props[:, 1].max():.3f}]")
+    print("images.py OK")

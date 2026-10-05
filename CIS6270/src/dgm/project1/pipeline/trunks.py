@@ -237,3 +237,23 @@ class TransformerField(nn.Module):
             h = block(h, cond, cos, sin)
         (shift, scale, _), = self.final(cond)
         return self.project_out(modulate(self.norm_out(h), shift, scale))
+
+
+if __name__ == "__main__":
+    import torch
+    B, L, D, H = 4, 16, 32, 64
+    z = torch.randn(B, L, D)
+    t = torch.rand(B)
+    c = torch.randint(0, 2, (B,))
+
+    for cond in CONDITIONINGS:
+        cond_val = c if cond == "binary" else (torch.randn(B, 1) if cond == "continuous" else None)
+        for mod in MODULATIONS:
+            trunk = TransformerField(L, D, H, conditioning=cond, modulation=mod,
+                                     rope=True, n_cond=1)
+            out = trunk(z, t, cond_val)
+            assert out.shape == (B, L, D) and out.isfinite().all(), \
+                f"{cond}/{mod}: shape {out.shape} or NaN"
+            print(f"  TransformerField({cond}/{mod}): shape={out.shape}")
+
+    print("trunks.py OK")

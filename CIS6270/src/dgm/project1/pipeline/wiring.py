@@ -147,3 +147,32 @@ def describe_innovations(args):
     if not args.rope:
         changed.append("no-rope")
     return "  Innovations : " + (", ".join(changed) if changed else "none (baseline)")
+
+
+if __name__ == "__main__":
+    import argparse
+    from .paths import PathSpec
+    from .schedules import make_ddpm_schedule
+    # Build a minimal stats dict that wiring.py uses.
+    import torch
+    _, _, abars, _ = make_ddpm_schedule(50)
+    stats = {"z_mean": torch.zeros(1), "z_std": torch.ones(1),
+             "r_mean": [0.0, 0.0], "r_std": [1.0, 1.0]}
+    p = PathSpec()
+    # latent_kwargs and censor_floor need an args namespace.
+    args = argparse.Namespace(amp=True, batch_size=16, arch="mlp",
+                              conditioning="binary", modulation="adaln",
+                              rope=True, n_cond=1, coupling="independent",
+                              coupling_beta=0.0, coupling_columns=None,
+                              interpolant="linear", path_geometry="segment",
+                              time_schedule="linear", sample_schedule="linear",
+                              path_scale=0.0, steps=50, predict="x0",
+                              beta_schedule="linear", ema=0.0, weighting="none",
+                              epochs=10, hidden=64, lr=1e-3, reward_lr=None,
+                              warmup=0, censor_floor=None, stratified=False,
+                              latent_dtype="float32", latent_device="cpu")
+    kw = latent_kwargs(args)
+    print(f"  latent_kwargs: {kw}")
+    floor = censor_floor(args, stats)
+    print(f"  censor_floor: {floor}")
+    print("wiring.py OK")

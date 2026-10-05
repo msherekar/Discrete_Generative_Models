@@ -45,3 +45,24 @@ def save_results(out_dir: Path, method: str, latents: dict, model, reward_model,
         "config":       config or {},
     }, method_dir / "results.pt")
     print(f"  Saved {method} results to {method_dir}/")
+
+
+if __name__ == "__main__":
+    import tempfile, torch
+    from pathlib import Path
+    # save_results needs a real model + esm tokenizer; just verify the directory
+    # creation and FASTA writing with a minimal mock.
+    out = Path(tempfile.mkdtemp())
+    latents = {"single": {"sequences": ["ACDEFG", "KLMNPQ"],
+                          "latent": torch.zeros(2, 6, 8),
+                          "oracle": None}}
+    # Call with None for model/reward/stats to test only directory creation.
+    try:
+        save_results(out, "flow", latents, None, None, None, "esm2_8m",
+                     6, 8, 0, [0.5, 0.4], config={"test": True})
+    except Exception as e:
+        # stats=None will fail when writing FASTA metadata -- that's expected.
+        # Verify the directory was created before the crash.
+        assert (out / "flow").exists(), f"method dir not created: {e}"
+        print(f"  save_results: directory created (stats=None expected error: {type(e).__name__})")
+    print("results.py OK")

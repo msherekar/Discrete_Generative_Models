@@ -198,3 +198,30 @@ def consensus(sequences):
     """Per-position most common residue; equals the wild type for DMS variant sets."""
     return "".join(max(AMINO_ACIDS, key=lambda a: sum(s[i] == a for s in sequences))
                    for i in range(len(sequences[0])))
+
+
+if __name__ == "__main__":
+    import torch
+    # composition_proxies: shape [N, 2], finite, in [0, 1] for fractions.
+    seqs = ["ACDEFGHIKLMN", "KRKRKRKRKRKR", "DEDEVEDEVE__".replace("_", "A")]
+    props = composition_proxies(seqs)
+    assert props.shape == (3, 2) and props.isfinite().all()
+    print(f"  composition_proxies: shape={props.shape}")
+    print(f"  charge proxy:    {props[:, 0].tolist()}")
+    print(f"  polarity proxy:  {props[:, 1].tolist()}")
+
+    # consensus: returns most-common residue per position.
+    seqs2 = ["ACDE", "ACDF", "ACDE"]
+    c = consensus(seqs2)
+    assert len(c) == 4
+    assert c[3] == "E", f"consensus mismatch at pos 3: {c[3]}"
+    print(f"  consensus(['ACDE','ACDF','ACDE']): {c!r}")
+
+    # choose_latent_device: returns a valid torch.device.
+    dev = choose_latent_device(100, 32, 16)
+    assert isinstance(dev, torch.device)
+    print(f"  choose_latent_device(100,32,16): {dev}")
+
+    # load_data requires ESM weights; skip here.
+    print(f"  load_data: requires ESM download (skipped in smoke test)")
+    print("data.py OK")

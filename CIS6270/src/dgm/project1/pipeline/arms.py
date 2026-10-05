@@ -288,3 +288,25 @@ def build_arms(args, parser, spec) -> dict:
                                  base_lambdas, mixed_lambdas))
     _announce_sweeps(args, spec)
     return arms
+
+
+if __name__ == "__main__":
+    from .objective import Objective
+    # ObjectiveSpec is a dataclass: construct with the correct fields.
+    obj = Objective(n_props=2, setpoint=1.0, senses=(1.0, 1.0))
+    spec = ObjectiveSpec(
+        objective=obj,
+        with_setpoint=lambda y: Objective(n_props=2, setpoint=y),
+        prop_names=["brightness", "stability"],
+        senses=[1.0, 1.0],
+        n_obj=2,
+        setpoint_raw=[1.0],
+        constraint_index=None,
+        constraint_threshold=None,
+    )
+    assert isinstance(spec.objective, Objective)
+    assert spec.n_obj == 2
+    print(f"  ObjectiveSpec: n_obj={spec.n_obj}  props={spec.prop_names}")
+    # confirm build_arms is importable and callable.
+    print(f"  build_arms callable: {callable(build_arms)}")
+    print("arms.py OK")

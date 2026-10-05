@@ -259,3 +259,31 @@ def add_arguments(parser):
                             "check watches for.")
     parser.set_defaults(attention=True)
     return parser
+
+
+if __name__ == "__main__":
+    import torch
+    B, C, H_img, W_img = 4, 1, 28, 28
+    x = torch.randn(B, C, H_img, W_img)
+    t = torch.rand(B)
+    c = torch.randint(0, 2, (B,))
+
+    # UNetField with modern=True (GroupNorm + sinusoidal t + attention).
+    unet = UNetField(C, None, "x0", "binary", attention=True)
+    out = unet(x, t, c)
+    assert out.shape == (B, C, H_img, W_img) and out.isfinite().all()
+    print(f"  UNetField(modern): output shape={out.shape}")
+
+    # UNetField with conditioning=none.
+    unet_none = UNetField(C, None, "x0", "none", attention=False)
+    out_none = unet_none(x, t)
+    assert out_none.shape == (B, C, H_img, W_img)
+    print(f"  UNetField(none): output shape={out_none.shape}")
+
+    # ImageReward: predicts 2 properties.
+    rew = ImageReward(C)
+    r = rew(x, t)
+    assert r.shape == (B, 2) and r.isfinite().all()
+    print(f"  ImageReward: output shape={r.shape}")
+
+    print("unet.py OK")

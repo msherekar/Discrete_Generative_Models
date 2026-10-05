@@ -83,3 +83,34 @@ def resolve_oracle(args, length):
               f"<file.npz>, or fit one with: "
               f"dgm-embedding-oracle --fit --backend metl")
     return oracle, oracle_path
+
+
+if __name__ == "__main__":
+    import numpy as np, tempfile
+    from pathlib import Path
+
+    # load_brightness_oracle with missing path returns None gracefully.
+    result = load_brightness_oracle(None)
+    assert result is None
+    print("  load_brightness_oracle(None): None (expected)")
+
+    result = load_brightness_oracle(Path("/nonexistent/oracle.npz"))
+    assert result is None
+    print("  load_brightness_oracle(missing): None (expected)")
+
+    # score_with_oracle with None oracle returns None.
+    preds = score_with_oracle(["ACDEFG", "ACDEFH"], None)
+    assert preds is None
+    print("  score_with_oracle(oracle=None): None (expected)")
+
+    # resolve_oracle with --no-oracle flag skips loading entirely.
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--no-oracle", action="store_true")
+    parser.add_argument("--oracle", default=None)
+    args = parser.parse_args(["--no-oracle"])
+    oracle_obj, oracle_path = resolve_oracle(args, length=6)
+    assert oracle_obj is None and oracle_path is None
+    print("  resolve_oracle(--no-oracle): (None, None)")
+
+    print("oracle.py OK")

@@ -137,3 +137,61 @@ def score_sequences(sequences: list[str], oracle, clip: bool = True) -> np.ndarr
         predicted = predicted.clip(domain["score_min"], domain["score_max"])
     return np.asarray(predicted, dtype=np.float64)
 
+
+
+if __name__ == "__main__":
+    import csv as _csv
+    import tempfile
+    import pathlib
+    import numpy as np
+    from sklearn.linear_model import Ridge
+
+    rng = np.random.default_rng(42)
+    wt = "ACDEFG"
+
+    # Fit a Ridge model directly on a synthetic feature matrix (no ESM needed).
+    n, d = 200, 32
+    X = rng.standard_normal((n, d)).astype(np.float32)
+    y = rng.standard_normal(n).astype(np.float32)
+    model = Ridge(alpha=1.0).fit(X, y)
+    rho_val, mae_val = 0.42, 0.31   # synthetic stand-ins
+    domain = {"score_min": float(y.min()), "score_max": float(y.max())}
+    n_features = d
+    print(f"  Ridge fit: coef shape={model.coef_.shape}  "
+          f"intercept={model.intercept_:.4f}")
+
+    # save_oracle / load_oracle round-trip.
+    with tempfile.TemporaryDirectory() as tmp:
+        p = pathlib.Path(tmp) / "oracle.npz"
+        save_oracle(p, model, wt, "esm2_8m_pca64",
+                    rho_val, mae_val, domain, n_features)
+        coef, intercept, wt2, backend2, dom2 = load_oracle(p)
+    assert np.allclose(coef, model.coef_.astype(np.float32)), \
+        "coef round-trip mismatch"
+    assert abs(intercept - float(model.intercept_)) < 1e-5, \
+        "intercept round-trip mismatch"
+    assert wt2 == wt and backend2 == "esm2_8m_pca64"
+    assert abs(dom2["score_min"] - domain["score_min"]) < 1e-5
+    print(f"  save/load round-trip: OK  wt={wt2!r}  backend={backend2!r}")
+
+    # read_split: parses sequence + score CSV.
+    with tempfile.TemporaryDirectory() as tmp:
+        p_csv = pathlib.Path(tmp) / "split.csv"
+        with p_csv.open("w", newline="") as f:
+            writer = _csv.DictWriter(f, fieldnames=["sequence", "score"])
+            writer.writeheader()
+            for seq, sc in [("ACDEFG", 1.5), ("ACDEFH", 0.3)]:
+                writer.writerow({"sequence": seq, "score": sc})
+        seqs_r, scores_r = read_split(p_csv)
+    assert seqs_r == ["ACDEFG", "ACDEFH"] and len(scores_r) == 2
+    print(f"  read_split: {seqs_r}  scores={scores_r.tolist()}")
+
+    # load_fasta: parses a two-record FASTA.
+    with tempfile.TemporaryDirectory() as tmp:
+        p_fa = pathlib.Path(tmp) / "test.fa"
+        p_fa.write_text(">seq1\nACDEFG\n>seq2\nACDEFH\n")
+        fa_seqs = load_fasta(p_fa)
+    assert fa_seqs == ["ACDEFG", "ACDEFH"], f"load_fasta: {fa_seqs}"
+    print(f"  load_fasta: {fa_seqs}")
+
+    print("oracles/fitting.py OK")

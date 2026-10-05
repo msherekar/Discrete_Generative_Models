@@ -147,3 +147,15 @@ def oracle_summary(args, setup, arms, flow_latents, diff_latents,
     print("\n  For the random-variant control and the full metric table, run:")
     print(f"    dgm-gfp-metrics --run-dir {out_root} \\")
     print(f"        --embedding-oracle {oracle_path} --baseline-n 50")
+
+
+if __name__ == "__main__":
+    # report_arm prints to stdout; verify it runs without raising.
+    wt = "ACDEFGHIKLMN"
+    seqs = [wt, "ECDEFGHIKLMN", "ACDEFGHIKLMK", "WCDEFGHIKLMN"]
+    report_arm("test", seqs, wt, scores=None)   # should print hamming stats
+
+    # report_arm with no reference (composition proxy path).
+    report_arm("noref", seqs, reference=None, scores=None)
+
+    print("reporting.py OK")

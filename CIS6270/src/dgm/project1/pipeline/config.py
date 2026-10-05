@@ -29,3 +29,17 @@ def resolve_cache_dir(override=None) -> Path:
     path = Path(chosen).expanduser().resolve()
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+if __name__ == "__main__":
+    print(f"  DEVICE:        {DEVICE}")
+    print(f"  AMINO_ACIDS:   {AMINO_ACIDS}  ({len(AMINO_ACIDS)} residues)")
+    print(f"  POLAR_RESIDUES:{POLAR_RESIDUES}  ({len(POLAR_RESIDUES)} residues)")
+    print(f"  BATCH_SIZE:    {BATCH_SIZE}")
+    print(f"  HIDDEN:        {HIDDEN}")
+    print(f"  LEARNING_RATE: {LEARNING_RATE}")
+    print(f"  DEFAULT_CACHE: {DEFAULT_CACHE}")
+    cache = resolve_cache_dir()
+    assert cache.exists(), f"cache dir does not exist: {cache}"
+    print(f"  resolve_cache_dir(): {cache}")
+    print("config.py OK")

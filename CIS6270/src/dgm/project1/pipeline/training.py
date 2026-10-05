@@ -314,3 +314,31 @@ def train_diffusion(dataset, epochs, batch_size=BATCH_SIZE, hidden=HIDDEN,
     model.eval().requires_grad_(False)
     reward.eval().requires_grad_(False)
     return model, reward, report.total, alpha_bars, betas, alphas, post_vars
+
+
+if __name__ == "__main__":
+    import torch
+    from torch.utils.data import TensorDataset
+    # Tiny synthetic dataset: 32 sequences, length 8, dim 16, 2 properties.
+    B, L, D = 32, 8, 16
+    z = torch.randn(B, L, D)
+    c = torch.randint(0, 2, (B,))
+    r = torch.randn(B, 2)
+    dataset = TensorDataset(z, c, r)
+    val_ds  = TensorDataset(z[:8], c[:8], r[:8])
+
+    # Flow training: 3 epochs, check loss decreases or at least stays finite.
+    fm, rm, losses, src = train_flow(
+        dataset, epochs=3, hidden=32, arch="mlp", conditioning="binary",
+        val_dataset=val_ds, amp=False, seed=0)
+    assert all(torch.isfinite(torch.tensor(v)) for v in losses), f"flow losses: {losses}"
+    print(f"  train_flow: losses={[f'{v:.4f}' for v in losses]}  src={src}")
+
+    # Diffusion training: 3 epochs.
+    dm, rm2, dlosses, abars, betas, alphas, pvars = train_diffusion(
+        dataset, epochs=3, hidden=32, arch="mlp", predict="x0",
+        conditioning="binary", val_dataset=val_ds, amp=False, seed=0)
+    assert all(torch.isfinite(torch.tensor(v)) for v in dlosses), f"diff losses: {dlosses}"
+    print(f"  train_diffusion: losses={[f'{v:.4f}' for v in dlosses]}")
+
+    print("training.py OK")

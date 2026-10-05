@@ -200,3 +200,35 @@ def censor_floor_from_stats(stats, raw_floor, index=0):
     mean = float(stats["r_mean"][index])
     std = float(stats["r_std"][index])
     return (float(raw_floor) - mean) / std
+
+
+if __name__ == "__main__":
+    import torch
+    B, L, D = 4, 8, 16
+    z0 = torch.randn(B, L, D)
+    eps = torch.randn(B, L, D)
+    abar = torch.rand(B, 1, 1) * 0.9 + 0.05
+    zk = abar.sqrt() * z0 + (1 - abar).sqrt() * eps
+
+    # v-prediction round-trip.
+    v = velocity_target(z0, eps, abar)
+    eps_back = eps_from_velocity(zk, v, abar)
+    x0_back = x0_from_velocity(zk, v, abar)
+    assert (eps_back - eps).abs().max() < 1e-5, "v->eps roundtrip failed"
+    assert (x0_back - z0).abs().max() < 1e-5, "v->x0 roundtrip failed"
+    print("  v-prediction round-trips: OK")
+
+    # generative_loss returns finite scalar for all parameterizations.
+    for pred in PREDICTIONS:
+        target = eps if pred == "eps" else (z0 if pred == "x0" else v)
+        loss = generative_loss(target, z0, eps, zk, abar, pred)
+        assert loss.isfinite(), f"generative_loss({pred}) not finite"
+        print(f"  generative_loss({pred}): {loss.item():.4f}")
+
+    # All weightings return finite, positive weights.
+    for w in WEIGHTINGS:
+        wt = loss_weight(abar, w)
+        assert (wt > 0).all() and wt.isfinite().all(), f"weight {w} not positive/finite"
+        print(f"  loss_weight({w}): mean={wt.mean().item():.4f}")
+
+    print("losses.py OK")

@@ -232,3 +232,55 @@ class EMA:
         state = model.state_dict()
         for k, v in self.shadow.items():
             state[k].copy_(v.to(state[k].dtype))
+
+
+if __name__ == "__main__":
+    import torch
+    B, L, D, H = 4, 16, 32, 64
+    t = torch.rand(B)
+
+    # FlowModel: forward returns correct shape.
+    fm = FlowModel(L, D, H, arch="transformer", conditioning="binary",
+                   modulation="adaln", rope=True, n_cond=1)
+    c = torch.randint(0, 2, (B,))
+    z = torch.randn(B, L, D)
+    out = fm(z, t, c)
+    assert out.shape == (B, L, D) and out.isfinite().all()
+    print(f"  FlowModel(transformer): output shape={out.shape}")
+
+    # FlowModel MLP variant.
+    fm_mlp = FlowModel(L, D, H, arch="mlp", conditioning="binary")
+    out_mlp = fm_mlp(z, t, c)
+    assert out_mlp.shape == (B, L, D)
+    print(f"  FlowModel(mlp): output shape={out_mlp.shape}")
+
+    # DiffusionModel: noise/to_noise round-trip.
+    from .schedules import make_ddpm_schedule
+    _, _, abars, _ = make_ddpm_schedule(100)
+    abars_cpu = abars.cpu()
+    dm = DiffusionModel(L, D, abars_cpu, H, arch="transformer", predict="x0",
+                        conditioning="binary", modulation="adaln", rope=True, n_cond=1)
+    dm = dm.cpu()
+    x0 = torch.randn(B, L, D)
+    k = torch.randint(1, 100, (B,))
+    kf = k.float() / 100
+    a = abars_cpu[k, None, None]
+    eps = torch.randn_like(x0)
+    zk = a.sqrt() * x0 + (1 - a).sqrt() * eps
+    pred = dm(zk, kf, c)
+    assert pred.shape == (B, L, D) and pred.isfinite().all()
+    print(f"  DiffusionModel: pred shape={pred.shape}")
+
+    # RewardModel: output shape [B, n_props].
+    rm = RewardModel(L, D, H, arch="transformer", n_props=2)
+    rew = rm(z, t)
+    assert rew.shape == (B, 2) and rew.isfinite().all()
+    print(f"  RewardModel: output shape={rew.shape}")
+
+    # EMA: shadow matches model after update.
+    ema = EMA(fm, decay=0.999)
+    ema.update(fm)
+    ema.copy_to(fm)
+    print(f"  EMA: update and copy_to OK")
+
+    print("nets.py OK")

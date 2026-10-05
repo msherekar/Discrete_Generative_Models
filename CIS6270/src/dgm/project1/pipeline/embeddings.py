@@ -204,3 +204,43 @@ def apply_rope(x, cos, sin):
     half = x.shape[-1] // 2
     rotated = torch.cat([-x[..., half:], x[..., :half]], dim=-1)
     return x * cos + rotated * sin
+
+
+if __name__ == "__main__":
+    import torch
+    from torch import nn
+    B, D = 8, 64
+
+    # sinusoidal: orthogonality at distinct times.
+    t = torch.linspace(0, 1, B)
+    feats = sinusoidal(t, D)
+    assert feats.shape == (B, D), f"sinusoidal shape {feats.shape}"
+    assert feats.isfinite().all()
+    # nearby times should differ; distant times should be near-orthogonal.
+    dot = (feats[0] * feats[-1]).sum() / (feats[0].norm() * feats[-1].norm())
+    print(f"  sinusoidal: shape={feats.shape}  t0·t1 cosine={dot:.3f}")
+
+    # TimeEmbedding forward.
+    te = TimeEmbedding(D)
+    out = te(t)
+    assert out.shape == (B, D) and out.isfinite().all()
+    print(f"  TimeEmbedding: output shape={out.shape}")
+
+    # FourierCondition forward (continuous) and null token.
+    fc = FourierCondition(D)
+    y = torch.randn(B)          # shape [B], not [B, 1]
+    cond = fc(y)
+    assert cond.shape == (B, D) and cond.isfinite().all()
+    null_mask = torch.ones(B, dtype=torch.bool)
+    null_out = fc(y, null_mask)
+    assert null_out.shape == (B, D)
+    print(f"  FourierCondition: cond shape={cond.shape}  null OK")
+
+    # ClassCondition forward.
+    cc = ClassCondition(D)
+    c = torch.randint(0, 2, (B,))
+    out_c = cc(c)
+    assert out_c.shape == (B, D)
+    print(f"  ClassCondition: output shape={out_c.shape}")
+
+    print("embeddings.py OK")

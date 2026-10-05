@@ -348,3 +348,46 @@ def step_indices(K, steps, spacing="linear"):
     if unique[-1] != 0:
         unique.append(0)
     return unique
+
+
+if __name__ == "__main__":
+    import torch
+    B, L, D = 4, 8, 16
+    z = torch.randn(B, L, D)
+
+    # NFE counter.
+    nfe = NFE()
+    nfe.spend(2); nfe.spend(3)
+    assert int(nfe) == 5
+    print(f"  NFE counter: {int(nfe)}")
+
+    # expected_nfe: CFG doubles cost per step.
+    assert expected_nfe(10, "euler") == 10
+    assert expected_nfe(10, "euler", cfg=True) == 20
+    assert expected_nfe(10, "heun") == 20
+    print(f"  expected_nfe: euler=10  euler+cfg=20  heun=20")
+
+    # flow_step: Euler and Heun return correct shapes.
+    def dummy_field(z, t, c=None, drop=None):
+        return torch.zeros_like(z)
+    t = torch.full((B,), 0.5)
+    for solver in FLOW_SOLVERS:
+        z_next = flow_step(z, t, 0.05, dummy_field, solver=solver)
+        assert z_next.shape == z.shape and z_next.isfinite().all(), f"{solver} shape/NaN"
+        print(f"  flow_step({solver}): shape={z_next.shape}")
+
+    # ddim_step: DDPM step.
+    from .schedules import make_ddpm_schedule
+    _, _, abars, _ = make_ddpm_schedule(100)
+    abars = abars.cpu()
+    eps = torch.randn_like(z)
+    z_prev, x0_est = ddim_step(z, eps, abars[50], abars[49])
+    assert z_prev.shape == z.shape and z_prev.isfinite().all()
+    print(f"  ddim_step: z_prev shape={z_prev.shape}  x0_est shape={x0_est.shape}")
+
+    # step_indices: monotone decreasing from K to 0.
+    idx = step_indices(100, 10)
+    assert idx[0] == 100 and idx[-1] == 0 and len(idx) == 11
+    print(f"  step_indices(100, 10): {idx}")
+
+    print("solvers.py OK")

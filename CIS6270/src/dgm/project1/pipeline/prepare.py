@@ -176,3 +176,13 @@ def prepare_run(args, parser, model_info, cache_dir) -> RunSetup:
         budgets=args.mut_budget, decode_fns=decode_fns,
         primary=next(iter(decode_fns)), anchor_kwargs=anchor_kwargs,
     )
+
+
+if __name__ == "__main__":
+    # RunSetup and its fields are importable and can be inspected.
+    import dataclasses
+    fields = [f.name for f in dataclasses.fields(RunSetup)]
+    print(f"  RunSetup fields: {fields}")
+    # prepare_run requires ESM + a real CSV; confirm it is callable.
+    print(f"  prepare_run callable: {callable(prepare_run)}")
+    print("prepare.py OK")
