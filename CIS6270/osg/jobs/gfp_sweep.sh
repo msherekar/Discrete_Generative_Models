@@ -231,7 +231,7 @@ if [ "${OSG_CHECK_ARMS:-1}" = "1" ] && [ -s "$TARGET" ]; then
 fi
 
 # ── optional: metrics on the node ────────────────────────────────────────────
-if [ "${OSG_METRICS:-1}" = "1" ]; then
+if [ "${OSG_METRICS:-1}" = "1" ] && [ -s "$TARGET" ]; then
     ORACLE_NPZ=""
     for candidate in "$DGM_ROOT/project1_eval/data"/avgfp_oracle*.npz; do
         [ -f "$candidate" ] && ORACLE_NPZ="$candidate"
@@ -241,9 +241,15 @@ if [ "${OSG_METRICS:-1}" = "1" ]; then
     if [ -z "$ORACLE_NPZ" ]; then
         say "[skip] no avgfp_oracle*.npz staged; not scoring"
     else
+        # results.pt was moved to $TARGET for safe transfer. Restore it to the
+        # run directory so gfp_metrics and study_plots can find it by convention.
+        mkdir -p "$OUT/$METHOD"
+        cp "$TARGET" "$OUT/$METHOD/results.pt"
         say "scoring with $(basename "$ORACLE_NPZ")"
         TRAIN_FLAG=()
-        [ -n "$DATASET" ] && TRAIN_FLAG=(--train "$DATASET")
+        # $DATASET is a relative path (e.g. data/avgfp_train_props.csv) recorded
+        # at run time, relative to $DGM_ROOT/project1_eval, not to $SCRATCH.
+        [ -n "$DATASET" ] && TRAIN_FLAG=(--train "$DGM_ROOT/project1_eval/$DATASET")
         "$PY" -u -m dgm.project1.gfp_metrics --run-dir "$OUT" \
             --oracle "$ORACLE_NPZ" "${TRAIN_FLAG[@]}" \
             --baseline-n "${OSG_BASELINE_N:-50}" --outdir "$OUT/metrics" \
@@ -253,6 +259,7 @@ if [ "${OSG_METRICS:-1}" = "1" ]; then
             --oracle "$ORACLE_NPZ" --outdir "$OUT/plots/study" \
             --prefix "$TAG" \
             || say "[warn] study figures failed; the run itself is unaffected"
+        rm -f "$OUT/$METHOD/results.pt"
     fi
 fi
 
