@@ -1,35 +1,5 @@
-# tag, seed, arch, hidden, epochs, batch, interpolant, predict, ema, steps
-#
-# Every column is a TRAINING-time choice: it changes the model, so it needs its
-# own job and pays the full overhead (27 min queue + 21 min image transfer were
-# measured on job 15833630). Anything that only affects sampling --
-# --cfg-weight, --reward-eta, --reward-lambda, --setpoint, --mut-budget,
-# --decode-temperature -- belongs in BASE_ARGS inside sweep.sub, where each
-# extra value costs one sampling pass and no new job. Each job below already
-# samples 4 cfg weights x 3 etas x 3 lambdas x 3 setpoints, decoded at 3
-# mutation budgets.
-#
-# RUN ONE JOB TO COMPLETION FIRST. At 500 epochs a job is ~7.7 h on an H100 and
-# ~25.6 h on an A40 -- require_gpus in sweep.sub excludes the slow tier for
-# exactly that reason, but confirm the wall time on a real node before
-# committing eight of them. Drop epochs to 250 here if you would rather have
-# the breadth sooner.
-#
-# tag must be unique here and across past submissions: it names the OSDF folder,
-# and OSDF caches by path, so a reused tag can serve a stale file. Date-stamp
-# the prefix when repeating a sweep, and run ../bin/prep_run.sh on every tag
-# before submitting.
-#
-# Two seeds of the baseline, then one job per innovation axis. The ema row is
-# there because flow's loss ticked UP at the last epoch in both long runs
-# (0.4090 -> 0.4117 at 125, 0.3094 -> 0.3156 at 250), which is what weight
-# averaging is for.
-base_s11_20261002,    11, transformer, 256, 500, 128, linear,    eps, 0,     200
-base_s12_20261002,    12, transformer, 256, 500, 128, linear,    eps, 0,     200
-ema_s11_20261002,     11, transformer, 256, 500, 128, linear,    eps, 0.999, 200
-ema_s12_20261002,     12, transformer, 256, 500, 128, linear,    eps, 0.999, 200
-x0_s11_20261002,      11, transformer, 256, 500, 128, linear,    x0,  0,     200
-trig_s11_20261002,    11, transformer, 256, 500, 128, trig,      eps, 0,     200
-quad_s11_20261002,    11, transformer, 256, 500, 128, quadratic, eps, 0,     200
-wide_s11_20261002,    11, transformer, 512, 500, 128, linear,    eps, 0,     200
-mlp_s11_20261002,     11, mlp,         256, 500, 128, linear,    eps, 0,     200
+# ── flow, NFE 10/20/50/100/200 x seeds 11-15 ─────────────────────────────────
+gfp_base_f010_s11, flow, 11, 250, 256, 256, continuous, adaln, x0, cosine, min-snr, segment, linear, independent, euler, ddim, 10, score, -2.418182, 0.999, 500, 1000
+
+# ── diffusion, same NFE grid and seeds ───────────────────────────────────────
+gfp_base_d010_s11, diffusion, 11, 150, 256, 256, continuous, adaln, x0, cosine, min-snr, segment, linear, independent, euler, ddim, 10, score, -2.418182, 0.999, 500, 1000
