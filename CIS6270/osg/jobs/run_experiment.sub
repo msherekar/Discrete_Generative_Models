@@ -163,7 +163,7 @@ gpus_minimum_memory = 16000
 
 request_cpus   = 4
 request_memory = 48GB
-request_disk   = 48GB
+request_disk   = 60GB
 
 +JobDurationCategory = "Long"
 
