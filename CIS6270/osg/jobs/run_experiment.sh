@@ -90,14 +90,17 @@ else
     export ESM2_CACHE="$DGM_ROOT/project1_eval/cache"
     echo "  [warn] no staged ESM weights; the run will try to download them" >&2
 fi
-# Precomputed latents from OSDF (DGM/latents/?recursive -> latents/*.pt) or
-# from an optional latent-cache.tar.gz unpack. load_data looks in ESM2_CACHE.
+# Precomputed latents: tarball dir, OSDF directory, or flat OSDF per-file
+# transfers (latents_*.pt in the sandbox). load_data looks in ESM2_CACHE.
 if [ -d latent-cache ]; then
     cp latent-cache/*.pt "$ESM2_CACHE/" 2>/dev/null || true
     say "latent cache: $(ls latent-cache | tr '\n' ' ')"
 elif [ -d latents ]; then
     cp latents/*.pt "$ESM2_CACHE/" 2>/dev/null || true
     say "latent cache: $(ls latents | tr '\n' ' ')"
+elif compgen -G 'latents_*.pt' > /dev/null; then
+    cp latents_*.pt "$ESM2_CACHE/"
+    say "latent cache: $(ls latents_*.pt | tr '\n' ' ')"
 fi
 say "ESM2_CACHE $ESM2_CACHE"
 ls "$ESM2_CACHE" 2>/dev/null | sed 's/^/    /' || true

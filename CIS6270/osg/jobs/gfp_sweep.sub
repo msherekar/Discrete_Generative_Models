@@ -71,11 +71,10 @@ container_image = $(OSDF_IMAGE)/dgm-gpu-$(IMAGE_VERSION).sif
 executable = gfp_sweep.sh
 arguments  = "$(tag) $(METHOD) $(BASE_ARGS) --dataset-tag $(tag) --seed $(seed) --sample-seed $(seed) --epochs $(epochs) --batch-size $(batch) --hidden $(hidden) --arch transformer --conditioning $(conditioning) --n-cond 3 --modulation $(modulation) --predict $(predict) --beta-schedule $(beta) --loss-weighting $(weighting) --path-geometry $(geometry) --time-schedule $(tschedule) --coupling $(coupling) --flow-solver $(fsolver) --diffusion-solver $(dsolver) --steps $(steps) --sample-steps $(steps) --guidance-scaling $(scaling) --censor-floor $(censor) --ema $(ema) --warmup $(warmup) --diffusion-steps $(K)"
 
-# Latents live on OSDF (too big for a single transfer_input_files tarball).
-# Condor pulls them into the sandbox as latents/*.pt; gfp_sweep.sh copies
-# them into ESM2_CACHE. Keep the .pt files at:
-#   /ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/latents/
-transfer_input_files = dgm-src.tar.gz, inputs.tar.gz, esm-cache.tar.gz, osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/latents/?recursive
+# Latents live on OSDF (too big for a tarball). List each file explicitly:
+# osdf://...?recursive can yield "Attempt to write to illegal sandbox path".
+# Files land flat in the sandbox; gfp_sweep.sh copies latents_*.pt into ESM2_CACHE.
+transfer_input_files = dgm-src.tar.gz, inputs.tar.gz, esm-cache.tar.gz, osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/latents/latents_avgfp_train_props_esm2_8m_L237.pt, osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/latents/latents_avgfp_val_esm2_8m_L237.pt
 
 should_transfer_files   = YES
 when_to_transfer_output = ON_EXIT_OR_EVICT
