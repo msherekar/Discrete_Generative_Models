@@ -71,9 +71,11 @@ container_image = $(OSDF_IMAGE)/dgm-gpu-$(IMAGE_VERSION).sif
 executable = gfp_sweep.sh
 arguments  = "$(tag) $(METHOD) $(BASE_ARGS) --dataset-tag $(tag) --seed $(seed) --sample-seed $(seed) --epochs $(epochs) --batch-size $(batch) --hidden $(hidden) --arch transformer --conditioning $(conditioning) --n-cond 3 --modulation $(modulation) --predict $(predict) --beta-schedule $(beta) --loss-weighting $(weighting) --path-geometry $(geometry) --time-schedule $(tschedule) --coupling $(coupling) --flow-solver $(fsolver) --diffusion-solver $(dsolver) --steps $(steps) --sample-steps $(steps) --guidance-scaling $(scaling) --censor-floor $(censor) --ema $(ema) --warmup $(warmup) --diffusion-steps $(K)"
 
-# The cached latents replace both the per-job encode of 41,372 sequences and
-# the ESM-2 weights themselves; see dgm-cache-latents.
-transfer_input_files = dgm-src.tar.gz, inputs.tar.gz, esm-cache.tar.gz, latent-cache.tar.gz
+# Latents live on OSDF (too big for a single transfer_input_files tarball).
+# Condor pulls them into the sandbox as latents/*.pt; gfp_sweep.sh copies
+# them into ESM2_CACHE. Keep the .pt files at:
+#   /ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/latents/
+transfer_input_files = dgm-src.tar.gz, inputs.tar.gz, esm-cache.tar.gz, osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/latents/?recursive
 
 should_transfer_files   = YES
 when_to_transfer_output = ON_EXIT_OR_EVICT

@@ -85,9 +85,13 @@ else
     echo "  [warn] no staged ESM weights; the run will try to download them" >&2
 fi
 # Latents, if staged, land beside the weights so load_data finds them.
+# latent-cache/ = unpacked tarball; latents/ = OSDF ?recursive of DGM/latents.
 if [ -d latent-cache ]; then
     cp latent-cache/*.pt "$ESM2_CACHE/" 2>/dev/null || true
     say "latent cache: $(ls latent-cache | tr '\n' ' ')"
+elif [ -d latents ]; then
+    cp latents/*.pt "$ESM2_CACHE/" 2>/dev/null || true
+    say "latent cache: $(ls latents | tr '\n' ' ')"
 fi
 # The METL checkpoint rides in whichever cache was staged; point the resolver
 # at it explicitly rather than relying on the search order.

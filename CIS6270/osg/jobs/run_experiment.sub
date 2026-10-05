@@ -106,12 +106,11 @@ executable = run_experiment.sh
 arguments  = "$(TAG) $(RUN_ARGS)"
 
 # ── input ────────────────────────────────────────────────────────────────────
-# All three sit well under the 1 GB mark above which OSG asks for OSDF:
-# code ~1 MB, this run's data ~13 MB, esm2_8m weights ~30 MB.
+# Code/inputs/weights are small tarballs. Precomputed ESM latents (~7 GB) live
+# on OSDF and are pulled into the sandbox as latents/*.pt (see run_experiment.sh).
 # For esm2_650m (2.5 GB) or bigger, drop esm-cache.tar.gz and use instead:
-#   transfer_input_files = dgm-src.tar.gz, inputs.tar.gz, \
-#       osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/data/esm-cache/?recursive
-transfer_input_files = dgm-src.tar.gz, inputs.tar.gz, esm-cache.tar.gz
+#   osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/data/esm-cache/?recursive
+transfer_input_files = dgm-src.tar.gz, inputs.tar.gz, esm-cache.tar.gz, osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/latents/?recursive
 
 # ── output ───────────────────────────────────────────────────────────────────
 # The small tarball comes home; the two results.pt files (200-400 MB each) are

@@ -55,7 +55,8 @@ container_image = $(OSDF_IMAGE)/dgm-gpu-$(IMAGE_VERSION).sif
 executable = run_experiment.sh
 arguments  = "$(tag) $(BASE_ARGS) --dataset-tag $(tag) --seed $(seed) --sample-seed $(seed) --arch $(arch) --hidden $(hidden) --epochs $(epochs) --batch-size $(batch) --interpolant $(interpolant) --predict $(predict) --ema $(ema) --diffusion-steps $(steps)"
 
-transfer_input_files = dgm-src.tar.gz, inputs.tar.gz, esm-cache.tar.gz
+# Latents on OSDF (not a tarball): see run_experiment.sh for unpack into ESM2_CACHE.
+transfer_input_files = dgm-src.tar.gz, inputs.tar.gz, esm-cache.tar.gz, osdf:///ospool/$(OSG_AP)/data/$(OSG_USER)/DGM/latents/?recursive
 
 should_transfer_files   = YES
 
