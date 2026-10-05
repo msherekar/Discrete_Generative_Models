@@ -89,8 +89,8 @@ environment = "OSG_WANDB=1 OSG_METRICS=1 OSG_BASELINE_N=50 OSG_HEARTBEAT_SECONDS
 
 request_gpus   = 1
 request_cpus   = 2
-request_memory = 24GB
-request_disk   = 20GB
+request_memory = 48GB
+request_disk   = 60GB
 
 require_gpus        = (Capability != 8.6 && Capability >= 8.0)
 
