@@ -124,13 +124,29 @@ def main():
         from torch.utils.data import TensorDataset as _TDS
         zv, cv, rv = val_ds.tensors
         s = setup.stats
+        n_val_props   = rv.shape[1]
+        n_train_props = s["r_mean"].shape[0]
         # Undo val-CSV standardization, apply training standardization.
         zv_rescaled = ((zv.float() * val_stats["z_std"].to(zv.device)
                         + val_stats["z_mean"].to(zv.device))
                        - s["z_mean"].to(zv.device)) / s["z_std"].to(zv.device)
         rv_rescaled = ((rv.float() * val_stats["r_std"].to(rv.device)
                         + val_stats["r_mean"].to(rv.device))
-                       - s["r_mean"].to(rv.device)) / s["r_std"].to(rv.device)
+                       - s["r_mean"][:n_val_props].to(rv.device)
+                       ) / s["r_std"][:n_val_props].to(rv.device)
+        # Val CSV may have fewer property columns than train (e.g. r3 from
+        # add_properties not yet run on it). Pad missing columns with 0
+        # (the training-standardized mean) so tensor shapes match throughout.
+        if n_val_props < n_train_props:
+            pad = n_train_props - n_val_props
+            rv_rescaled = _torch.cat(
+                [rv_rescaled,
+                 _torch.zeros(rv.shape[0], pad,
+                              dtype=rv_rescaled.dtype, device=rv.device)], dim=1)
+            cv = _torch.cat(
+                [cv,
+                 _torch.zeros(cv.shape[0], pad,
+                              dtype=cv.dtype, device=cv.device)], dim=1)
         val_dataset = _TDS(zv_rescaled.to(zv.dtype), cv, rv_rescaled)
 
     guide_kwargs = sample_kwargs(args)
