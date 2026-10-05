@@ -138,14 +138,14 @@ class DiffusionModel(nn.Module):
         """The raw prediction, in this model's own parameterization."""
         return self.trunk(z, t, c, drop)
 
-    def alpha_bar_at(self, t):
-        """abar for a batch of normalized times, shaped to broadcast."""
+    def alpha_bar_at(self, t, ndim=3):
+        """abar for a batch of normalized times, shaped to broadcast over ndim."""
         k = (t * self.K).round().long().clamp(0, self.K)
-        return self.alpha_bars[k].view((-1,) + (1,) * 2)
+        return self.alpha_bars[k].view((-1,) + (1,) * (ndim - 1))
 
     def to_noise(self, prediction, z, t):
         """Convert any parameterization to the eps the reverse update needs."""
-        a = self.alpha_bar_at(t)
+        a = self.alpha_bar_at(t, z.dim())
         if self.predict == "eps":
             return prediction
         if self.predict == "v":

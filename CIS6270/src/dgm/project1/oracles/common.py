@@ -75,7 +75,7 @@ def device():
 
 def seq_to_variant(sequence: str, wt: str) -> str:
     """METL's mutation-string form, e.g. 'K1E,A108D'. '_wt' when identical."""
-    muts = [f"{a}{i}{b}" for i, (a, b) in enumerate(zip(wt, sequence)) if a != b]
+    muts = [f"{a}{i}{b}" for i, (a, b) in enumerate(zip(wt, sequence), start=1) if a != b]
     return ",".join(muts) if muts else "_wt"
 
 

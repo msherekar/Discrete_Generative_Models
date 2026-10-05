@@ -245,7 +245,7 @@ def plot(rows, kinds, label, outdir, prefix, methods, variants):
                          f"right and low is better; labels are the strength")
             ax.legend(fontsize=8)
     fig.tight_layout()
-    path = outdir / f"{prefix}_15_guidance_frontier.png"
+    path = outdir / f"{prefix}_guidance_frontier.png"
     fig.savefig(path, dpi=150)
     plt.close(fig)
     return path

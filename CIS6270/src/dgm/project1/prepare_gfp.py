@@ -159,7 +159,7 @@ def main():
     oracle = stratified_sample(annotated, args.oracle_n, args.seed)
     used   = {r["variant"] for r in oracle}
     train  = stratified_sample([r for r in annotated if r["variant"] not in used],
-                               args.n, args.seed)
+                               args.n, args.seed + 1)
 
     write_csv(args.outdir / f"{key}_train_{len(train)}.csv", train)
     write_csv(args.outdir / f"{key}_oracle.csv", oracle)

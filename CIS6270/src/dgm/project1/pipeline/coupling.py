@@ -187,8 +187,8 @@ def couple(z0, z1, kind="independent", beta=0.0, aux=None, columns=None):
     """
     if kind not in KINDS:
         raise ValueError(f"unknown coupling '{kind}', expected one of {KINDS}")
-    if kind in ("independent", "informed"):
-        # `informed` changes the source, not the pairing: see informed_source().
+    if kind in ("independent", "informed", "informed-shuffled", "scaled"):
+        # these change the source, not the pairing: see informed_source().
         return torch.arange(len(z0), device=z0.device)
     cost = _normalized(cost_matrix(z0, z1))
     if kind == "aux":

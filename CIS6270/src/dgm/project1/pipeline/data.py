@@ -79,7 +79,7 @@ def load_data(csv_path: Path, esm_hf_id: str, cache_dir: Path,
     # to be constrained rather than scalarized. Two columns is the older layout
     # and still works.
     names = [f"r{i}" for i in range(1, 100)]
-    names = names[:next((k for k, n in enumerate(names) if n not in rows[0]), 0)]
+    names = names[:next((k for k, n in enumerate(names) if n not in rows[0]), len(names))]
     if len(names) >= 2:
         r = torch.tensor([[float(row[n]) for n in names] for row in rows])
     else:

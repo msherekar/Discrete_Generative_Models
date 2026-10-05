@@ -83,7 +83,7 @@ def partition(rows, test_frac, val_frac, seed, mode):
         n = len(bucket)
         n_test = int(round(n * test_frac))
         n_val = int(round(n * val_frac))
-        if n_test == 0 or n_val == 0:
+        if n_test == 0 and n_val == 0:
             undersized.append((key, n, n_test, n_val))
         test += bucket[:n_test]
         val += bucket[n_test:n_test + n_val]

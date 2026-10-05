@@ -102,7 +102,8 @@ VAL_LEVELS = (0.1, 0.3, 0.5, 0.7, 0.9)
 
 
 @torch.no_grad()
-def _validate_flow(model, dataset, path, batch_size, conditioning, n_cond, seed=0):
+def _validate_flow(model, dataset, path, batch_size, conditioning, n_cond,
+                   amp=True, seed=0):
     """Held-out flow-matching loss, averaged over a fixed time grid."""
     if dataset is None:
         return None
@@ -117,7 +118,7 @@ def _validate_flow(model, dataset, path, batch_size, conditioning, n_cond, seed=
             t = torch.full((len(z1),), level, device=DEVICE)
             z0 = torch.randn_like(z1)
             zt, target = interpolate(z0, z1, t, **path.kwargs)
-            with autocast():
+            with autocast(amp):
                 total += F.mse_loss(model(zt, t, cond).float(), target).item()
             steps += 1
     model.train()
@@ -126,7 +127,7 @@ def _validate_flow(model, dataset, path, batch_size, conditioning, n_cond, seed=
 
 @torch.no_grad()
 def _validate_diffusion(model, dataset, alpha_bars, batch_size, predict,
-                        conditioning, n_cond, seed=0):
+                        conditioning, n_cond, amp=True, seed=0):
     """Held-out denoising loss on a fixed ladder of noise levels."""
     if dataset is None:
         return None
@@ -145,7 +146,7 @@ def _validate_diffusion(model, dataset, alpha_bars, batch_size, predict,
             a = alpha_bars[k, None, None]
             eps = torch.randn_like(z0)
             zk = a.sqrt() * z0 + (1 - a).sqrt() * eps
-            with autocast():
+            with autocast(amp):
                 prediction = model(zk, t, cond)
             total += generative_loss(prediction.float(), z0, eps, zk, a,
                                      predict).item()
@@ -196,6 +197,9 @@ def train_flow(dataset, epochs, batch_size=BATCH_SIZE, hidden=HIDDEN,
     for epoch in range(epochs):
         gen_total, rew_total = 0.0, 0.0
         for z1, c, r_tilde in batches:
+            z1 = z1.to(DEVICE)
+            c = c.to(DEVICE)
+            r_tilde = r_tilde.to(DEVICE)
             # Where z0 comes from is the coupling's whole job: an identity
             # pairing is the lecture default, OT re-pairs within the batch, and
             # an informed source draws from a property-derived distribution the
@@ -222,7 +226,7 @@ def train_flow(dataset, epochs, batch_size=BATCH_SIZE, hidden=HIDDEN,
         report.add(gen_total, rew_total, len(batches))
         report.validation.append(
             _validate_flow(model, val_dataset, path, batch_size, conditioning,
-                           n_cond, seed))
+                           n_cond, amp, seed))
         report.show("flow", epoch, epochs)
 
     if ema is not None:
@@ -274,6 +278,9 @@ def train_diffusion(dataset, epochs, batch_size=BATCH_SIZE, hidden=HIDDEN,
     for epoch in range(epochs):
         gen_total, rew_total = 0.0, 0.0
         for z0, c, r_tilde in batches:
+            z0 = z0.to(DEVICE)
+            c = c.to(DEVICE)
+            r_tilde = r_tilde.to(DEVICE)
             k = sample_timesteps(len(z0), K, DEVICE, stratified)
             t = k.float() / K
             a = alpha_bars[k, None, None]
@@ -299,7 +306,7 @@ def train_diffusion(dataset, epochs, batch_size=BATCH_SIZE, hidden=HIDDEN,
         report.add(gen_total, rew_total, len(batches))
         report.validation.append(
             _validate_diffusion(model, val_dataset, alpha_bars, batch_size,
-                                predict, conditioning, n_cond, seed))
+                                predict, conditioning, n_cond, amp, seed))
         report.show("diffusion", epoch, epochs)
 
     if ema is not None:

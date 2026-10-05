@@ -74,7 +74,7 @@ PlainUNet = None
 
 def train_flow(dataset, args):
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
-    model  = UNetField(args.channels, None, "x0", args.conditioning,
+    model  = UNetField(args.channels, None, args.predict, args.conditioning,
                        args.attention and args.unet == "modern").to(DEVICE)
     reward = ImageReward(args.channels).to(DEVICE)
     opt = torch.optim.Adam(list(model.parameters()) + list(reward.parameters()),

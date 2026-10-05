@@ -261,7 +261,7 @@ def main():
                            "w1": fidelity_w1(props["cfg"], reference[method]),
                            "loss_final": losses[-1] if len(losses) else np.nan}
                     if modality == "image":
-                        ink, sat = image_fidelity(d, method)
+                        ink, sat = image_fidelity(d, method, mode="cfg")
                         row["ink"] = ink
                         row["saturation"] = sat
                     rows.append(row)
@@ -305,7 +305,7 @@ def main():
                         marker="o", capsize=4, color=COLORS.get(v),
                         label=VARIANT_LABEL.get(v, v))
         ax.axhline(0, color="k", lw=0.8, ls=":",
-                   label="perfect match" if metric == "w1" else None)
+                   label="perfect match" if metric == "w1" else "no guidance gain")
         if min(levels) > 0:
             ax.set_xscale("log")
         ax.set_xlabel(x_label)
