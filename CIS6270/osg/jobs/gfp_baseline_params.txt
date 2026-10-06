@@ -1,24 +1,3 @@
-# Stage 3: the matched flow-vs-diffusion baseline every innovation is read against.
-#
-# Columns:
-#  tag METHOD seed epochs batch hidden conditioning modulation predict beta
-#  weighting geometry tschedule coupling fsolver dsolver steps scaling censor
-#  ema warmup K
-#
-# NFE is swept through `steps`, which sets both the flow Euler budget and the
-# DDIM level count, so one column matches the cost of both methods. The
-# diffusion solver is ddim throughout for exactly that reason: the ancestral
-# ddpm chain always costs K=1000 evaluations and cannot be matched to anything.
-#
-# Epoch budgets come from Stage 0.5.3 rather than the old fixed 500: flow's
-# last 125 of 500 epochs bought 5%, and diffusion's loss was non-monotonic and
-# flat after 125 (0.1819 -> 0.1728 -> 0.2086 -> 0.1799). With --val-dataset now
-# wired these are starting points to be re-read off the validation curve.
-#
-# Seeds 11-15 for the five-replicate protocol; --seed and --sample-seed are
-# both set from this column so replicates are independent in weights AND noise.
-
-# ── flow, NFE 10/20/50/100/200 x seeds 11-15 ─────────────────────────────────
 gfp_base_f010_s11, flow, 11, 250, 256, 256, continuous, adaln, x0, cosine, min-snr, segment, linear, independent, euler, ddim, 10, score, -2.418182, 0.999, 500, 1000
 gfp_base_f010_s12, flow, 12, 250, 256, 256, continuous, adaln, x0, cosine, min-snr, segment, linear, independent, euler, ddim, 10, score, -2.418182, 0.999, 500, 1000
 gfp_base_f010_s13, flow, 13, 250, 256, 256, continuous, adaln, x0, cosine, min-snr, segment, linear, independent, euler, ddim, 10, score, -2.418182, 0.999, 500, 1000
@@ -44,8 +23,6 @@ gfp_base_f200_s12, flow, 12, 250, 256, 256, continuous, adaln, x0, cosine, min-s
 gfp_base_f200_s13, flow, 13, 250, 256, 256, continuous, adaln, x0, cosine, min-snr, segment, linear, independent, euler, ddim, 200, score, -2.418182, 0.999, 500, 1000
 gfp_base_f200_s14, flow, 14, 250, 256, 256, continuous, adaln, x0, cosine, min-snr, segment, linear, independent, euler, ddim, 200, score, -2.418182, 0.999, 500, 1000
 gfp_base_f200_s15, flow, 15, 250, 256, 256, continuous, adaln, x0, cosine, min-snr, segment, linear, independent, euler, ddim, 200, score, -2.418182, 0.999, 500, 1000
-
-# ── diffusion, same NFE grid and seeds ───────────────────────────────────────
 gfp_base_d010_s11, diffusion, 11, 150, 256, 256, continuous, adaln, x0, cosine, min-snr, segment, linear, independent, euler, ddim, 10, score, -2.418182, 0.999, 500, 1000
 gfp_base_d010_s12, diffusion, 12, 150, 256, 256, continuous, adaln, x0, cosine, min-snr, segment, linear, independent, euler, ddim, 10, score, -2.418182, 0.999, 500, 1000
 gfp_base_d010_s13, diffusion, 13, 150, 256, 256, continuous, adaln, x0, cosine, min-snr, segment, linear, independent, euler, ddim, 10, score, -2.418182, 0.999, 500, 1000
