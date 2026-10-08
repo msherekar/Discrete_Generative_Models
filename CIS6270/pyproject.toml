@@ -53,6 +53,9 @@ dgm-transfer           = "dgm.project1.transfer:main"
 dgm-postprocess        = "dgm.project1.postprocess:main"
 dgm-cache-latents      = "dgm.project1.cache_latents:main"
 dgm-check-arms         = "dgm.project1.diagnostics.check_arms:main"
+dgm-three-oracle       = "dgm.project1.three_oracle:main"
+dgm-setpoint-sweep     = "dgm.project1.setpoint_sweep:main"
+dgm-relabel-oracle     = "dgm.project1.relabel_oracle:main"
 dgm-anneal             = "dgm.project1.baselines.anneal:main"
 
 [build-system]
