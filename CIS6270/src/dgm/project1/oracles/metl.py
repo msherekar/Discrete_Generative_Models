@@ -79,7 +79,7 @@ def encode_metl(sequences: list[str], wt: str, batch_size: int = 64) -> np.ndarr
                 chunk = sequences[start:start + batch_size]
                 variants = [seq_to_variant(s, wt) for s in chunk]
                 x = encoder(encoding="int_seqs", variants=variants,
-                            wt_aa=wt, wt_offset=0)
+                            wt_aa=wt, wt_offset=1)
                 model(torch.tensor(x).to(device()), pdb_fn=METL_PDB)
                 out.append(captured["h"].numpy().astype(np.float32))
     finally:
@@ -153,7 +153,7 @@ def metl_attributes(sequences: list[str], wt: str, batch_size: int = 64) -> np.n
             chunk = sequences[start:start + batch_size]
             variants = [seq_to_variant(s, wt) for s in chunk]
             x = encoder(encoding="int_seqs", variants=variants,
-                        wt_aa=wt, wt_offset=0)
+                        wt_aa=wt, wt_offset=1)
             y = model(torch.tensor(x).to(device()), pdb_fn=METL_PDB)
             out.append(y.detach().cpu().numpy().astype(np.float32))
     return np.concatenate(out)
@@ -168,7 +168,7 @@ def metl_attributes_wt(wt: str) -> np.ndarray:
     import torch
     model, encoder = _load_metl()
     with chdir(METL_ROOT), torch.no_grad():
-        x = encoder(encoding="int_seqs", variants=["_wt"], wt_aa=wt, wt_offset=0)
+        x = encoder(encoding="int_seqs", variants=["_wt"], wt_aa=wt, wt_offset=1)
         y = model(torch.tensor(x).to(device()), pdb_fn=METL_PDB)
     return y.detach().cpu().numpy().astype(np.float32)[0]
 
