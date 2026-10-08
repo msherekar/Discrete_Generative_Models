@@ -15,12 +15,21 @@ COLUMNS = ("tag", "METHOD", "seed", "epochs", "batch", "hidden", "conditioning",
            "censor", "ema", "warmup", "K")
 
 # The Stage 3 control. Every axis row below is this with one field replaced.
+#
+# steps=100 rather than 50. The baseline sweep measured the response of every
+# arm against step count: the cfg and spp90 arms are flat, but the high-eta
+# reward arms climb steeply and only plateau by 100 (spp99@60 runs
+# 0.02/0.13/0.36/0.51/0.54 at 10/20/50/100/200). A control at 50 sits on the
+# steepest part of that curve, so any axis change that happens to shift
+# effective integration accuracy reads as an effect on those arms. 100 is the
+# first point where flow has settled, and gfp_base_{f,d}100_s11..15 already
+# ran there -- so --no-ctl below reuses them instead of recomputing.
 BASELINE = {
     "METHOD": "flow", "seed": 11, "epochs": 250, "batch": 256, "hidden": 256,
     "conditioning": "continuous", "modulation": "adaln", "predict": "x0",
     "beta": "cosine", "weighting": "min-snr", "geometry": "segment",
     "tschedule": "linear", "coupling": "independent", "fsolver": "euler",
-    "dsolver": "ddim", "steps": 50, "scaling": "score",
+    "dsolver": "ddim", "steps": 100, "scaling": "score",
     "censor": -2.418182, "ema": 0.999, "warmup": 500, "K": 1000,
 }
 
@@ -75,9 +84,8 @@ AXES = {
         ("heun", {"fsolver": "heun", "dsolver": "heun"}),
         ("mid", {"fsolver": "midpoint"}),
         ("ddpm", {"dsolver": "ddpm"}),
-        ("n10", {"steps": 10}),
-        ("n20", {"steps": 20}),
-        ("n200", {"steps": 200}),
+        # No n10/n20/n50/n200 arms: the baseline sweep ran all five step counts
+        # for both methods at these settings, so they are already measured.
     ],
     "arch": [                                    # Stage 1
         ("ctl", {}),
@@ -87,19 +95,34 @@ AXES = {
     ],
 }
 
-# Axes whose variants only change sampling are flow-only or diffusion-only in
-# part; running both methods for every axis keeps the comparison symmetric.
+# Which columns each method's code path actually reads, from pipeline/wiring.py:
+# flow_train_kwargs adds the path (geometry, tschedule) and the coupling;
+# diffusion_train_kwargs adds predict, beta_schedule, loss_weighting and K; and
+# each sampler reads only its own solver. A row that varies a column the chosen
+# method never reads reproduces that axis's control exactly, so it is not
+# queued -- 75 such jobs were about to be submitted across the six axes.
+FLOW_ONLY = {"geometry", "tschedule", "coupling", "fsolver"}
+DIFFUSION_ONLY = {"predict", "beta", "weighting", "dsolver", "K"}
+
 METHODS = ("flow", "diffusion")
 
 
-def rows_for(axis, variants, seeds, methods):
+def reaches(method, overrides):
+    """False when every column this variant changes is one `method` ignores."""
+    if not overrides:
+        return True                      # the control
+    ignored = DIFFUSION_ONLY if method == "flow" else FLOW_ONLY
+    return not set(overrides) <= ignored
+
+
+def rows_for(axis, variants, seeds, methods, skip_ctl=False):
     """Every job row for one axis, as dicts keyed by COLUMNS."""
     out = []
     for method in methods:
         for label, overrides in variants:
-            # A coupling is a flow-time construct; skip it for diffusion
-            # rather than queueing a job whose column has no effect.
-            if axis == "coup" and method == "diffusion" and overrides:
+            if not reaches(method, overrides):
+                continue
+            if skip_ctl and not overrides:
                 continue
             for seed in seeds:
                 row = dict(BASELINE)
@@ -144,6 +167,13 @@ def parse_args():
     parser.add_argument("--methods", nargs="+", default=list(METHODS),
                         choices=list(METHODS))
     parser.add_argument("--outdir", type=Path, default=Path(__file__).parent)
+    parser.add_argument("--no-ctl", action="store_true",
+                        help="Omit the 'ctl' rows. At steps=100 they are "
+                             "byte-identical to gfp_base_{f,d}100_s11..15, "
+                             "which already completed, and runs are "
+                             "bit-reproducible -- so reuse those results as "
+                             "the control instead of spending 10 jobs per "
+                             "axis recomputing them.")
     parser.add_argument("--one-seed", action="store_true",
                         help="Emit only the first seed, for a cheap dry run of "
                              "the whole ladder before committing five "
@@ -156,7 +186,8 @@ def main():
     seeds = args.seeds[:1] if args.one_seed else args.seeds
     total = 0
     for axis in args.axes:
-        rows = rows_for(axis, AXES[axis], seeds, args.methods)
+        rows = rows_for(axis, AXES[axis], seeds, args.methods,
+                        skip_ctl=args.no_ctl)
         path = args.outdir / f"gfp_{axis}_params.txt"
         count = write(path, axis, rows)
         total += count
