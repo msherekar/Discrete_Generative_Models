@@ -62,27 +62,13 @@ def compute_exact_and_tag_gains(
     )
 
 
-def positive_percentile_ranks(values_1d: torch.Tensor) -> torch.Tensor:
+def signed_normalized_gains(values_1d: torch.Tensor) -> torch.Tensor:
     """
-    Map strictly improving moves (gain > 0) to percentile ranks in (0, 1] while
-    assigning 0.0 to non-improving / overshooting moves (gain <= 0).
+    Scale-normalize gains into [-1, 1] per objective while preserving sign:
+      > 0 means improves objective, == 0 means chemically orthogonal, < 0 means harms objective.
     """
-    pos_mask = values_1d > 1e-8
-    out = torch.zeros_like(values_1d)
-    n_pos = int(pos_mask.sum().item())
-    if n_pos == 0:
-        return out
-    if n_pos == 1:
-        out[pos_mask] = 1.0
-        return out
-    pos_vals = values_1d[pos_mask]
-    lt = (pos_vals.unsqueeze(0) < pos_vals.unsqueeze(1)).to(values_1d.dtype).sum(dim=1)
-    le = (pos_vals.unsqueeze(0) <= pos_vals.unsqueeze(1)).to(values_1d.dtype).sum(dim=1)
-    # Ranks in (0, 1] scaled smoothly by tanh of gain magnitude to prevent near-zero chatter
-    raw_rank = 0.5 * (lt + le) / float(n_pos)
-    mag_gate = torch.tanh(pos_vals * 2.0)
-    out[pos_mask] = raw_rank * mag_gate
-    return out
+    scale = values_1d.abs().quantile(0.95).clamp(min=1e-6)
+    return (values_1d / scale).clamp(-1.5, 1.0)
 
 
 def compute_hypercone_log_tilt(
@@ -95,42 +81,50 @@ def compute_hypercone_log_tilt(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute multi-objective Doob h-transform log-rate tilt across candidate jumps.
-    Guarantees `log_tilt[gate == 0] == 0` and stops boosting once targets are hit.
+    Evaluates hypercone alignment over active/harmed objectives so chemically
+    neutral (zero-delta) dimensions in high-K tasks are not falsely penalized.
     """
     one_body_only = mode == "1A_1body"
     use_tag = mode in ("TAG", "MOG_TAG")
     use_cone = mode in ("1A", "1A_1body", "MOG_TAG")
 
     g_exact, g_tag, _ = compute_exact_and_tag_gains(P, engine, one_body_only=one_body_only)
-    gains = g_tag if use_tag else g_exact
+    gains = g_tag if use_tag else g_exact  # [B, K, L_max, 21]
     B, K, L, V = gains.shape
-    omega = engine.get_omega()
+    omega = engine.get_omega()  # [K]
 
-    if mode == "TAG":
-        raw_dir = torch.einsum("bklv,k->blv", gains, omega).clamp(-4.0, 4.0)
-        gate = active_slot_mask.unsqueeze(-1).to(gains.dtype).expand_as(raw_dir)
-        return gamma * gate * raw_dir, gate
-
-    ranks = torch.zeros_like(gains)
+    norm_g = torch.zeros_like(gains)
     for b in range(B):
         slot_idx = torch.nonzero(active_slot_mask[b], as_tuple=False).squeeze(-1)
         if slot_idx.numel() == 0:
             continue
         for k in range(K):
             flat_vals = gains[b, k, slot_idx, :].reshape(-1)
-            ranks[b, k, slot_idx, :] = positive_percentile_ranks(flat_vals).view(-1, V)
+            norm_g[b, k, slot_idx, :] = signed_normalized_gains(flat_vals).view(-1, V)
 
-    dir_score = torch.einsum("bklv,k->blv", ranks, omega)
-    has_pos = dir_score > 1e-8
-    if not use_cone:
-        gate = (has_pos & active_slot_mask.unsqueeze(-1)).to(gains.dtype)
+    dir_score = torch.einsum("bklv,k->blv", norm_g, omega)
+    if mode == "TAG":
+        gate = active_slot_mask.unsqueeze(-1).to(gains.dtype).expand_as(dir_score)
         return gamma * gate * dir_score, gate
 
-    r_norm = ranks.norm(dim=1) + 1e-12
-    cos_alpha = (dir_score / r_norm).clamp(-1.0, 1.0)
+    has_pos = dir_score > 1e-6
+    if not use_cone or cone_angle_deg >= 89.0:
+        gate = (has_pos & active_slot_mask.unsqueeze(-1)).to(gains.dtype)
+        return gamma * gate * dir_score.clamp(min=0.0), gate
+
+    # Active/harmed mask: include objective k if move touches it (|g_k| > 0.05) OR harms it (g_k < -0.01)
+    touched = ((norm_g.abs() > 0.05) | (norm_g < -0.01)).to(gains.dtype)  # [B, K, L, V]
+    omega_sub = touched * omega.view(1, K, 1, 1)
+    sub_dot = (norm_g * omega_sub).sum(dim=1)
+    g_sub_norm = (norm_g * touched).norm(dim=1) + 1e-12
+    w_sub_norm = omega_sub.norm(dim=1) + 1e-12
+    cos_alpha = (sub_dot / (g_sub_norm * w_sub_norm)).clamp(-1.0, 1.0)
+
     cos_thresh = math.cos(math.radians(cone_angle_deg))
     gate = (has_pos & (cos_alpha >= cos_thresh - 1e-7) & active_slot_mask.unsqueeze(-1)).to(gains.dtype)
-    return gamma * gate * dir_score, gate
+    return gamma * gate * dir_score.clamp(min=0.0), gate
+
+
 
 
 def apply_doob_rate_tilt(

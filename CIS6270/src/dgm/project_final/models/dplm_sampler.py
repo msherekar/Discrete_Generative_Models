@@ -104,38 +104,60 @@ def mdlm_train_step(
 
 class HuggingFaceDPLMWrapper(nn.Module):
     """
-    Wraps HuggingFace `airkingbd/dplm_150m`, `airkingbd/dplm_650m`, or `facebook/esm2_*`
-    masked protein language models, mapping our 22-state tokens into HF IDs and projecting
-    output logits back onto our canonical 21-token vocabulary (ACDEFGHIKLMNPQRSTVWY + <PAD>).
+    Loads local or HuggingFace DPLM (`Synthyra/DPLM-150M`, `Synthyra/DPLM-650M`)
+    or ESM-2 checkpoints with exact `sdpa` numerics and maps logits to our 21 tokens.
     """
 
-    def __init__(self, model_name_or_path: str = "airkingbd/dplm_150m") -> None:
+    ALIASES = {
+        "dplm_150m": ("DPLM-150M", "Synthyra/DPLM-150M"),
+        "airkingbd/dplm_150m": ("DPLM-150M", "Synthyra/DPLM-150M"),
+        "dplm_650m": ("DPLM-650M", "Synthyra/DPLM-650M"),
+        "airkingbd/dplm_650m": ("DPLM-650M", "Synthyra/DPLM-650M"),
+    }
+
+    def __init__(self, model_name_or_path: str = "dplm_150m") -> None:
         super().__init__()
-        from transformers import AutoModelForMaskedLM, AutoTokenizer
+        from transformers import AutoConfig, AutoModelForMaskedLM, AutoTokenizer
+        from dgm.project_final.config import DATA_DIR
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True)
+        if model_name_or_path in self.ALIASES:
+            subdir, repo_id = self.ALIASES[model_name_or_path]
+            local_dir = DATA_DIR / "models" / subdir
+            resolved = str(local_dir) if (local_dir / "config.json").exists() else repo_id
+        else:
+            resolved = model_name_or_path
+
+        cfg = AutoConfig.from_pretrained(resolved, trust_remote_code=True)
+        if hasattr(cfg, "attn_backend"):
+            cfg.attn_backend = "sdpa"
+
         self.backbone = AutoModelForMaskedLM.from_pretrained(
-            model_name_or_path, trust_remote_code=True, torch_dtype=torch.bfloat16
+            resolved, config=cfg, trust_remote_code=True, torch_dtype=torch.bfloat32
         )
-        vocab_map = self.tokenizer.get_vocab()
-        pad_hf = self.tokenizer.pad_token_id or vocab_map.get("<pad>", 1)
-        mask_hf = self.tokenizer.mask_token_id or vocab_map.get("<mask>", 32)
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(resolved, trust_remote_code=True)
+        except Exception:
+            self.tokenizer = self.backbone.tokenizer
 
+        vocab_map = self.tokenizer.get_vocab()
+        pad_hf = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else vocab_map.get("<pad>", 1)
+        mask_hf = self.tokenizer.mask_token_id if self.tokenizer.mask_token_id is not None else vocab_map.get("<mask>", 32)
         aa_hf_ids = [vocab_map[ch] for ch in AA20]
-        # in_map: maps our {0..19, PAD=20, MASK=21} -> HF input_ids
+
         self.register_buffer("in_map", torch.tensor(aa_hf_ids + [pad_hf, mask_hf], dtype=torch.long))
-        # out_map: extracts our 21 clean tokens {0..19, PAD=20} from HF vocabulary logits
         self.register_buffer("out_map", torch.tensor(aa_hf_ids + [pad_hf], dtype=torch.long))
 
     def forward(self, x_tokens: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
-        hf_ids = self.in_map[x_tokens]
-        attn_mask = (x_tokens != PAD_ID).long()
-        # Keep attention active on at least first token to avoid NaN softmax on all-PAD rows
-        attn_mask[:, 0] = 1
-        outputs = self.backbone(input_ids=hf_ids, attention_mask=attn_mask)
-        logits_21 = outputs.logits[:, :, self.out_map].float()
-        return logits_21
-
+            hf_ids = self.in_map[x_tokens]
+            attn_mask = (x_tokens != PAD_ID).long()
+            attn_mask[:, 0] = 1
+            if hf_ids.is_cuda:
+                with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                    out = self.backbone(input_ids=hf_ids, attention_mask=attn_mask)
+            else:
+                out = self.backbone(input_ids=hf_ids, attention_mask=attn_mask)
+            logits = out.logits if hasattr(out, "logits") else out[0]
+            return logits[:, :, self.out_map].float()
 
 @torch.no_grad()
 def sample_track_a(

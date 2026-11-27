@@ -1,15 +1,17 @@
 """
 Independent evaluation suite for generated responsive IDP sequences.
 
-Computes multi-condition biophysical errors and constraint pass rates from first
-principles (never sharing tensors with BiophysicalEngine), plus `localcider` kappa,
-`metapredict` intrinsic disorder, `ESM-2` pseudo-perplexity, diversity, novelty,
-2D/KD Monte-Carlo Pareto hypervolume, and optional CALVADOS/OpenMM R_g shifts.
+Loads `esm2_t33_650M_UR50D.pt` / `esm2_t30_150M_UR50D.pt` directly from
+`~/.cache/torch/hub/checkpoints/` via `fair-esm` (cached in GPU memory across runs),
+recomputes biophysical metrics from first principles, and evaluates `localcider`
+and `metapredict` oracles.
 """
 
 from __future__ import annotations
 
 import math
+import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
@@ -24,12 +26,14 @@ _HYDRO = {
     "I": 0.90, "K": 0.14, "L": 0.92, "M": 0.83, "N": 0.37, "P": 0.76, "Q": 0.39,
     "R": 0.72, "S": 0.59, "T": 0.67, "V": 0.83, "W": 0.98, "Y": 0.94,
 }
-# Campen et al. TOP-IDP disorder propensity scale (fallback only if metapredict absent)
 _TOP_IDP = {
     "A": 0.06, "C": 0.02, "D": 0.192, "E": 0.736, "F": -0.697, "G": 0.166, "H": 0.303,
     "I": -0.486, "K": 0.586, "L": -0.326, "M": -0.397, "N": 0.007, "P": 0.987, "Q": 0.318,
     "R": 0.180, "S": 0.341, "T": 0.059, "V": -0.121, "W": -0.884, "Y": -0.510,
 }
+
+# Persistent in-memory cache so 5-seed sweeps load ESM-2 650M only once on DGX Spark
+_ESM2_MEM_CACHE: Dict[Tuple[str, str], Tuple[str, Any, Any]] = {}
 
 try:
     from localcider.sequenceParameters import SequenceParameters as _CiderParams
@@ -42,8 +46,55 @@ except ImportError:
     _metapredict = None
 
 
+def load_cached_esm2_oracle(
+    model_name: str = "esm2_t33_650M_UR50D",
+    device: Optional[torch.device] = None,
+) -> Tuple[str, Any, Any]:
+    """
+    Load ESM-2 from `~/.cache/torch/hub/checkpoints/*.pt` via `fair-esm` first
+    (using TF32 Tensor Cores on GB10 and `weights_only=False` for PyTorch 2.6+
+    compatibility), falling back to HuggingFace only if `.pt` is absent.
+    """
+    dev = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if dev.type == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = True
+
+    stem = model_name.split("/")[-1].replace(".pt", "")
+    cache_key = (stem, str(dev))
+    if cache_key in _ESM2_MEM_CACHE:
+        return _ESM2_MEM_CACHE[cache_key]
+
+    torch_home = Path(os.environ.get("TORCH_HOME", Path.home() / ".cache" / "torch"))
+    ckpt_path = torch_home / "hub" / "checkpoints" / f"{stem}.pt"
+    reg_path = torch_home / "hub" / "checkpoints" / f"{stem}-contact-regression.pt"
+
+    if ckpt_path.exists():
+        import esm
+
+        model_data = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        reg_data = (
+            torch.load(reg_path, map_location="cpu", weights_only=False)
+            if reg_path.exists()
+            else None
+        )
+        model, alphabet = esm.pretrained.load_model_and_alphabet_core(stem, model_data, reg_data)
+        model = model.to(dev).eval()
+        entry = ("fair_esm", model, alphabet)
+        _ESM2_MEM_CACHE[cache_key] = entry
+        return entry
+
+    from transformers import AutoModelForMaskedLM, AutoTokenizer
+
+    hf_id = model_name if "/" in model_name else f"facebook/{stem}"
+    tok = AutoTokenizer.from_pretrained(hf_id)
+    mdl = AutoModelForMaskedLM.from_pretrained(hf_id).to(dev).eval()
+    entry = ("hf", mdl, tok)
+    _ESM2_MEM_CACHE[cache_key] = entry
+    return entry
+
+
 def independent_condition_props(seq: str, cond: EnvConditionSpec) -> Dict[str, float]:
-    """Compute exact NCPR, FCR, salt-screened SCD, and thermo-SHD independently on a string."""
+    """Compute exact NCPR, FCR, Gaussian-chain salt SCD, and thermo-SHD independently."""
     L = max(len(seq), 1)
     q = []
     for ch in seq:
@@ -98,35 +149,56 @@ def predict_disorder_scores(sequences: Sequence[str]) -> Tuple[List[float], str]
 @torch.no_grad()
 def compute_esm2_pseudo_perplexity(
     sequences: Sequence[str],
-    model_name: str = "facebook/esm2_t12_35M_UR50D",
+    model_name: str = "esm2_t33_650M_UR50D",
     device: Optional[torch.device] = None,
     max_positions: int = 24,
 ) -> List[float]:
-    """Compute subsampled masked pseudo-perplexity using pretrained ESM-2 on GPU."""
-    from transformers import AutoModelForMaskedLM, AutoTokenizer
-
+    """Compute masked evolutionary pseudo-perplexity using cached `fair-esm` (or HF) ESM-2."""
     dev = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    tok = AutoTokenizer.from_pretrained(model_name)
-    mdl = AutoModelForMaskedLM.from_pretrained(model_name).to(dev).eval()
-    mask_id = tok.mask_token_id
+    backend, mdl, tok_or_alpha = load_cached_esm2_oracle(model_name=model_name, device=dev)
 
     ppls: List[float] = []
+    if backend == "fair_esm":
+        batch_converter = tok_or_alpha.get_batch_converter()
+        mask_idx = tok_or_alpha.mask_idx
+        for seq in sequences:
+            if not seq:
+                ppls.append(999.0)
+                continue
+            _, _, toks = batch_converter([("idp", seq)])
+            input_ids = toks[0].to(dev)  # [L + 2] (<cls> + seq + <eos>)
+            L = len(seq)
+            step = max(1, L // max_positions)
+            pos_list = list(range(1, L + 1, step))
+            batch_in = input_ids.unsqueeze(0).repeat(len(pos_list), 1)
+            targets = [int(input_ids[p].item()) for p in pos_list]
+            for r_i, p_idx in enumerate(pos_list):
+                batch_in[r_i, p_idx] = mask_idx
+
+            logits = mdl(batch_in, repr_layers=[], return_contacts=False)["logits"].float()
+            nll = 0.0
+            for r_i, (p_idx, tgt) in enumerate(zip(pos_list, targets)):
+                log_probs = torch.log_softmax(logits[r_i, p_idx], dim=-1)
+                nll -= float(log_probs[tgt].item())
+            ppls.append(float(math.exp(min(nll / max(len(pos_list), 1), 10.0))))
+        return ppls
+
+    mask_id = tok_or_alpha.mask_token_id
     for seq in sequences:
         if not seq:
             ppls.append(999.0)
             continue
-        enc = tok(seq, return_tensors="pt").to(dev)
-        input_ids = enc["input_ids"][0]  # [1 + L + 1] with <cls> ... <eos>
+        enc = tok_or_alpha(seq, return_tensors="pt").to(dev)
+        input_ids = enc["input_ids"][0]
         L = len(seq)
         step = max(1, L // max_positions)
         pos_list = list(range(1, L + 1, step))
         batch_in = input_ids.unsqueeze(0).repeat(len(pos_list), 1)
-        targets = []
+        targets = [int(input_ids[p].item()) for p in pos_list]
         for r_i, p_idx in enumerate(pos_list):
-            targets.append(int(input_ids[p_idx].item()))
             batch_in[r_i, p_idx] = mask_id
 
-        logits = mdl(batch_in).logits
+        logits = mdl(batch_in).logits.float()
         nll = 0.0
         for r_i, (p_idx, tgt) in enumerate(zip(pos_list, targets)):
             log_probs = torch.log_softmax(logits[r_i, p_idx], dim=-1)
@@ -147,21 +219,17 @@ def normalized_seq_distance(a: str, b: str) -> float:
 def compute_pareto_hypervolume(
     error_vectors: Sequence[Sequence[float]], ref_bound: float = 2.0, n_mc: int = 4096
 ) -> float:
-    """
-    Estimate dominated hypervolume in [0, ref_bound]^D (minimization of objective MAEs)
-    using deterministic Sobol quasi-Monte-Carlo points so arbitrary D >= 2 works cleanly.
-    """
+    """Estimate dominated hypervolume in [0, ref_bound]^D via Sobol quasi-Monte-Carlo."""
     if not error_vectors:
         return 0.0
-    errs = torch.tensor(error_vectors, dtype=torch.float32)  # [N, D]
+    errs = torch.tensor(error_vectors, dtype=torch.float32)
     valid = (errs < ref_bound).all(dim=-1)
     if not valid.any():
         return 0.0
     errs = errs[valid]
     D = errs.size(1)
     sobol = torch.quasirandom.SobolEngine(dimension=D, scramble=False)
-    pts = sobol.draw(n_mc) * ref_bound  # [M, D]
-    # Point p is dominated if there exists candidate c with c_d <= p_d for all d
+    pts = sobol.draw(n_mc) * ref_bound
     dominated = (errs.unsqueeze(1) <= pts.unsqueeze(0)).all(dim=-1).any(dim=0)
     return float(dominated.float().mean().item())
 
@@ -171,7 +239,7 @@ def evaluate_sequences(
     task: TaskSpec,
     train_reference: Optional[Sequence[str]] = None,
     compute_esm2: bool = False,
-    esm2_model: str = "facebook/esm2_t12_35M_UR50D",
+    esm2_model: str = "esm2_t33_650M_UR50D",
     scd_tol: float = 0.45,
     shd_tol: float = 0.45,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
@@ -235,7 +303,6 @@ def evaluate_sequences(
         per_seq.append(rec)
         err_matrix.append(errs if errs else [0.0])
 
-    # Pairwise internal diversity (subsampled to <= 120 sequences for speed)
     sub = clean_seqs[:120]
     div_pairs = [
         normalized_seq_distance(sub[i], sub[j])
