@@ -1,0 +1,25 @@
+modality,method,rule,eta,n_seeds,fid_mean,fid_per_seed,mean_ink,ink_valid_range,outside_pixel_range
+MNIST,flow,score (INNOVATION),0,3,35.5,22/42/42,-0.7388,"[-0.949,-0.312]",False
+MNIST,flow,score (INNOVATION),5,3,1044.5,1153/949/1031,-0.1353,"[-0.949,-0.312]",False
+MNIST,flow,score (INNOVATION),20,3,3497.5,2526/3685/4281,0.6454,"[-0.949,-0.312]",False
+MNIST,flow,score (INNOVATION),60,3,21101.0,2702/26670/33931,2.5825,"[-0.949,-0.312]",True
+MNIST,flow,legacy,0,3,35.5,22/42/42,-0.7388,"[-0.949,-0.312]",False
+MNIST,flow,legacy,5,3,94.0,81/85/116,-0.6198,"[-0.949,-0.312]",False
+MNIST,flow,legacy,20,3,500.7,541/463/498,-0.2744,"[-0.949,-0.312]",False
+MNIST,flow,legacy,60,3,2585.8,2054/2693/3011,0.4566,"[-0.949,-0.312]",False
+MNIST,flow,constant,0,3,35.5,22/42/42,-0.7388,"[-0.949,-0.312]",False
+MNIST,flow,constant,5,3,165.1,158/159/178,-0.5466,"[-0.949,-0.312]",False
+MNIST,flow,constant,20,3,1167.1,1180/1094/1228,-0.0193,"[-0.949,-0.312]",False
+MNIST,flow,constant,60,3,4254.0,1963/4854/5945,0.9127,"[-0.949,-0.312]",False
+MNIST,diffusion,score (INNOVATION),0,3,30.3,38/21/32,-0.7394,"[-0.949,-0.312]",False
+MNIST,diffusion,score (INNOVATION),5,3,1536.8,1389/1392/1830,-0.1941,"[-0.949,-0.312]",False
+MNIST,diffusion,score (INNOVATION),20,3,1599.6,1456/1875/1468,-0.1018,"[-0.949,-0.312]",False
+MNIST,diffusion,score (INNOVATION),60,3,1726.9,1460/2030/1691,-0.1102,"[-0.949,-0.312]",False
+MNIST,diffusion,legacy,0,3,30.3,38/21/32,-0.7394,"[-0.949,-0.312]",False
+MNIST,diffusion,legacy,5,3,1531.7,1389/1374/1832,-0.1971,"[-0.949,-0.312]",False
+MNIST,diffusion,legacy,20,3,1578.3,1458/1816/1460,-0.0997,"[-0.949,-0.312]",False
+MNIST,diffusion,legacy,60,3,1747.8,1459/2105/1679,-0.114,"[-0.949,-0.312]",False
+MNIST,diffusion,constant,0,3,30.3,38/21/32,-0.7394,"[-0.949,-0.312]",False
+MNIST,diffusion,constant,5,3,1529.1,1384/1366/1837,-0.1972,"[-0.949,-0.312]",False
+MNIST,diffusion,constant,20,3,1615.9,1458/1923/1466,-0.0988,"[-0.949,-0.312]",False
+MNIST,diffusion,constant,60,3,1719.6,1459/2008/1692,-0.1113,"[-0.949,-0.312]",False

@@ -53,6 +53,8 @@ from .pipeline.losses import generative_loss   # noqa: E402
 from .pipeline.schedules import (make_ddpm_schedule,   # noqa: E402
                                  add_arguments as add_schedule_arguments)
 from .pipeline.losses import add_arguments as add_objective_arguments  # noqa: E402
+from .pipeline.guidance import (velocity_guidance_scale,   # noqa: E402
+                                add_arguments as add_guidance_arguments)
 from .pipeline.coupling import (add_arguments as add_coupling_arguments,  # noqa: E402
                                 columns_from_args, pair, source_for)
 
@@ -175,7 +177,20 @@ def sample_flow(model, reward_model, args, n, c=1, w=0.0, eta=0.0, lambdas=(1., 
         if w:
             v = v + w * (model(z, t, cond) - model(z, t, null))
         if eta:
-            kappa = eta * 4 * t[:, None, None, None] * (1 - t[:, None, None, None])
+            # The scaling rule is the transferred innovation, so it comes
+            # from the same function the avGFP sweep measured rather than
+            # being re-written here. The previous hardcoded
+            # eta * 4t(1-t) is exactly --guidance-scaling legacy, which on
+            # avGFP was the arm that did NOT survive the independent oracle
+            # (0.84% above WT vs 1.50% for constant and 0.87% control), so
+            # leaving it hardcoded would have transferred the losing rule.
+            kappa = velocity_guidance_scale(eta, t, args.guidance_scaling,
+                                            path.kwargs)
+            # The shared function shapes its coefficient for the protein
+            # pipeline's [B, L, D] latents; images are [B, 1, 28, 28], so
+            # re-broadcast to whatever rank this modality uses rather than
+            # forking the rule itself.
+            kappa = kappa.reshape(-1, *([1] * (z.dim() - 1)))
             endpoint = None
             if args.endpoint_guidance:
                 def endpoint(state, _t=t, _null=null):
@@ -251,6 +266,7 @@ def parse_args():
     p.add_argument("--endpoint-guidance", action="store_true")
     p.add_argument("--normalize-guidance", action="store_true")
     p.add_argument("--guidance-clip", type=float, default=0.0)
+    add_guidance_arguments(p)
     p.add_argument("--predict", default="x0", choices=("x0", "v", "eps"))
     p.add_argument("--conditioning", default="binary",
                    choices=("binary", "continuous", "none"))

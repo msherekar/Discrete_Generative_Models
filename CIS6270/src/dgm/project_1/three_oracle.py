@@ -41,7 +41,12 @@ ORACLES = ("indicator", "metl_embed", "ft1d64")
 LABELS = {"indicator": "indicator ridge\n(fit on train, additive)",
           "metl_embed": "METL embedding\n(independent representation)",
           "ft1d64": "METL ft-1d-64\n(64 examples, near-independent)"}
-TAG = re.compile(r"(gfp_\w*?_?([fd])(\d+)_s(\d+))")
+# Two run-naming conventions live side by side. The baseline sweep encodes the
+# step count in the tag (gfp_base_f100_s11); the axis sweeps encode the variant
+# instead and hold steps fixed (gfp_coup_aux_f_s11). Both collapse to the same
+# (method, group, seed) triple, where `group` is whatever the sweep varied.
+TAG_BASE = re.compile(r"gfp_\w+?_([fd])(\d+)_s(\d+)")
+TAG_AXIS = re.compile(r"gfp_(\w+?)_(\w+)_([fd])_s(\d+)")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -49,12 +54,23 @@ TAG = re.compile(r"(gfp_\w*?_?([fd])(\d+)_s(\d+))")
 # ══════════════════════════════════════════════════════════════════════════════
 
 def parse_tag(path):
-    """(method, steps, seed) from a run directory name, or None."""
-    m = TAG.search(str(path))
-    if not m:
-        return None
-    return ({"f": "flow", "d": "diffusion"}[m.group(2)],
-            int(m.group(3)), int(m.group(4)))
+    """(method, group, seed) from a run directory name, or None.
+
+    `group` is the step count for a baseline run and the variant label for an
+    axis run, so one table holds both and every downstream grouping still
+    works. Baseline is tried first because gfp_base_f100_s11 would otherwise
+    also satisfy the axis pattern.
+    """
+    name = Path(path).name
+    m = TAG_BASE.match(name)
+    if m:
+        return ({"f": "flow", "d": "diffusion"}[m.group(1)],
+                m.group(2), int(m.group(3)))
+    m = TAG_AXIS.match(name)
+    if m:
+        return ({"f": "flow", "d": "diffusion"}[m.group(3)],
+                f"{m.group(1)}:{m.group(2)}", int(m.group(4)))
+    return None
 
 
 def wt_references(wt, data_dir):
@@ -122,7 +138,6 @@ def score_runs(run_dirs, wt, data_dir, out_csv):
 def read_table(path):
     out = []
     for r in csv.DictReader(open(path)):
-        r["steps"] = int(r["steps"])
         r["seed"] = int(r["seed"])
         r["is_wt"] = int(r["is_wt"])
         for c in ORACLES:
@@ -180,28 +195,36 @@ def plot(rows, wt_ref, out_path, arms_a=("cfg", "cfg@4", "spp90", "spp99@60")):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     cells = cell_means(rows)
-    steps = sorted({k[1] for k in cells})
+    steps = sorted({k[1] for k in cells}, key=lambda g: (not g.isdigit(), int(g) if g.isdigit() else g))
     fig = plt.figure(figsize=(16, 11))
     gs = fig.add_gridspec(3, 3, hspace=0.42, wspace=0.28,
                           height_ratios=[1.15, 1.0, 1.0])
     colour = dict(zip(ORACLES, ("#1b6ca8", "#c1583a", "#2e7d5b")))
+    # A baseline sweep varies a step count, which plots on a log axis; an axis
+    # sweep varies a named variant, which plots as evenly spaced categories.
+    numeric = all(g.isdigit() for g in steps)
+    xs = [int(g) for g in steps] if numeric else list(range(len(steps)))
 
-    # A -- response to step count, one column per oracle, both methods
+    # A -- response to the swept variable, one column per oracle, both methods
     for j, c in enumerate(ORACLES):
         ax = fig.add_subplot(gs[0, j])
         for arm, ls in zip(arms_a, ("-", "--", "-.", ":")):
             for meth, mk in (("flow", "o"), ("diffusion", "s")):
-                y = [cells.get((meth, s, arm), {}).get(c) for s in steps]
-                if any(v is None for v in y):
+                pts = [(x, cells.get((meth, s, arm), {}).get(c))
+                       for x, s in zip(xs, steps)]
+                pts = [(x, v) for x, v in pts if v is not None]
+                if not pts:
                     continue
-                ax.plot(steps, y, ls, marker=mk, ms=4, lw=1.4,
+                ax.plot([x for x, _ in pts], [v for _, v in pts], ls,
+                        marker=mk, ms=4, lw=1.4,
                         color=colour[c], alpha=1.0 if meth == "flow" else 0.38,
                         label=f"{arm} ({meth[0]})")
         ax.axhline(wt_ref[c], color="k", lw=0.8, ls=":")
-        ax.set_xscale("log")
-        ax.set_xticks(steps)
-        ax.set_xticklabels(steps)
-        ax.set_xlabel("integration steps")
+        if numeric:
+            ax.set_xscale("log")
+        ax.set_xticks(xs)
+        ax.set_xticklabels(steps, rotation=0 if numeric else 45, fontsize=7)
+        ax.set_xlabel("integration steps" if numeric else "variant")
         if j == 0:
             ax.set_ylabel("mean oracle score")
         ax.set_title(LABELS[c], fontsize=9)

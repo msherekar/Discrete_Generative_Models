@@ -1,0 +1,7 @@
+modality,method,rule,n_designs,above_wt_indicator,above_wt_metl_embed,above_wt_ft1d64,pct_indicator,pct_metl_embed,pct_ft1d64,per_seed_ft1d64,total_ft1d64
+avGFP,flow,score (CONTROL),13745,879,64,119,6.395,0.466,0.866,34/25/16/17/27,119
+avGFP,flow,legacy,13670,808,68,115,5.911,0.497,0.841,34/26/1/8/46,115
+avGFP,flow,constant,13747,932,84,206,6.78,0.611,1.499,36/43/70/16/41,206
+avGFP,diffusion,score (CONTROL),13945,174,4,20,1.248,0.029,0.143,6/6/5/1/2,20
+avGFP,diffusion,legacy,13968,167,15,13,1.196,0.107,0.093,3/2/0/2/6,13
+avGFP,diffusion,constant,13972,164,10,31,1.174,0.072,0.222,8/2/8/7/6,31

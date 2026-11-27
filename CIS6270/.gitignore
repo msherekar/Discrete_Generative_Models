@@ -35,6 +35,9 @@ CIS6270/project1_eval/samples
 CIS6270/project1_eval/samples_
 metl/
 Slides/
+osg/jobs/postprocess_out/
+osg/jobs/tar_files/
+osg/jobs
 
 # .md files
 CIS6270/IDEA.md
