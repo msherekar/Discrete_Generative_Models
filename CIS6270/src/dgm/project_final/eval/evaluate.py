@@ -72,7 +72,7 @@ def independent_condition_props(seq: str, cond: EnvConditionSpec) -> Dict[str, f
     for i in range(L):
         for j in range(i + 1, L):
             d = j - i
-            scd_acc += q[i] * q[j] * math.sqrt(d) * math.exp(-kappa_res * d)
+            scd_acc += q[i] * q[j] * math.sqrt(d) * math.exp(-kappa_res * math.sqrt(d))
             shd_acc += (lam[i] * lam[j]) * (d ** (-cond.shd_beta))
     return {"ncpr": ncpr, "fcr": fcr, "scd": scd_acc / L, "shd": shd_acc / L}
 

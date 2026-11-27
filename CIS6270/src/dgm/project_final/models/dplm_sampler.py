@@ -151,17 +151,30 @@ def sample_track_a(
     record_tag_diag: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
     """
-    Generate discrete responsive IDP sequences from 0% -> 100% unmasked over configurable
-    `cfg.num_steps`, returning (final_tokens [B, L_max], P_final [B, L_max, 21], diag_dict).
+    Generate contiguous variable-length responsive IDPs from 0% -> 100% unmasked.
+    Preserves the marginal unmasking rate da / (1 - a) while tilting destination
+    amino acid probabilities via Doob's h-transform (preventing Step-0 overshoot).
     """
     denoiser.eval()
     device = engine.device
     L_max = engine.L_max
     num_steps = max(int(cfg.num_steps), 1)
 
-    x = torch.full((batch_size, L_max), MASK_ID, device=device, dtype=torch.long)
+    # Sample contiguous active chain length L_b in [L_min, L_max] per sequence
     if fixed_length is not None:
-        x[:, fixed_length:] = PAD_ID
+        lengths = torch.full((batch_size,), fixed_length, device=device, dtype=torch.long)
+    else:
+        lengths = torch.randint(
+            engine.task.L_min, engine.task.L_max + 1, (batch_size,), device=device
+        )
+
+    pos_idx = torch.arange(L_max, device=device).unsqueeze(0)
+    active_chain = pos_idx < lengths.unsqueeze(1)
+    x = torch.where(
+        active_chain,
+        torch.full((batch_size, L_max), MASK_ID, device=device, dtype=torch.long),
+        torch.full((batch_size, L_max), PAD_ID, device=device, dtype=torch.long),
+    )
 
     u_grid = torch.linspace(0.0, 1.0, num_steps + 1, device=device)
     alphas = u_grid.pow(2) if schedule == "quadratic" else u_grid
@@ -169,38 +182,36 @@ def sample_track_a(
     diag_true_dmu: List[torch.Tensor] = []
     diag_tag_g: List[torch.Tensor] = []
     diag_exact_g: List[torch.Tensor] = []
-    P_eff = torch.full((batch_size, L_max, VOCAB_SIZE), 1.0 / VOCAB_SIZE, device=device)
 
     for step in range(num_steps):
         a_cur = alphas[step].expand(batch_size)
+        a_scalar = float(alphas[step].item())
         da = float((alphas[step + 1] - alphas[step]).item())
 
         logits = denoiser(x, a_cur) / max(cfg.temperature, 1e-3)
-        if fixed_length is not None:
-            logits[:, :fixed_length, PAD_ID] = -1e9
-            logits[:, fixed_length:, :20] = -1e9
-            logits[:, fixed_length:, PAD_ID] = 10.0
+        # Enforce contiguous active prefix (no mid-chain PAD) and PAD suffix
+        logits[:, :, PAD_ID] = torch.where(active_chain, torch.full_like(logits[:, :, 0], -1e9), 10.0)
+        logits[:, :, :20] = torch.where(active_chain.unsqueeze(-1), logits[:, :, :20], -1e9)
 
         P = torch.softmax(logits, dim=-1)
-        is_masked = x == MASK_ID
+        is_masked = (x == MASK_ID) & active_chain
         clamped_oh = F.one_hot(x.clamp(max=PAD_ID), num_classes=VOCAB_SIZE).to(P.dtype)
         P_eff = torch.where(is_masked.unsqueeze(-1), P, clamped_oh)
 
-        # Unguided CTMC unmasking rate scale (1 + eta*a) / (1 - a)
-        a_scalar = float(alphas[step].item())
-        rate_scale = (1.0 + cfg.remask_eta * a_scalar) / max(1.0 - a_scalar, 1e-3)
-        u_base = rate_scale * P
-
         if mode in ("unguided", "1B_only"):
-            u_tilted = u_base
+            dest_probs = P
         else:
+            # Relax cone slightly early on when all objectives improve broadly, tighten later
+            eff_cone = max(engine.task.cone_angle_deg, 55.0 - 25.0 * a_scalar)
             log_tilt, _ = compute_hypercone_log_tilt(
                 P_eff, is_masked, engine,
-                cone_angle_deg=engine.task.cone_angle_deg,
+                cone_angle_deg=eff_cone if mode == "1A" else engine.task.cone_angle_deg,
                 gamma=engine.task.gamma,
                 mode=mode,
             )
-            u_tilted = apply_doob_rate_tilt(u_base, log_tilt)
+            tilted = apply_doob_rate_tilt(P, log_tilt)
+            tilted[:, :, PAD_ID] = torch.where(active_chain, 0.0, 1.0)
+            dest_probs = tilted / (tilted.sum(dim=-1, keepdim=True) + 1e-12)
 
         if record_tag_diag and step == num_steps // 2:
             g_ex, g_tg, dmu = compute_exact_and_tag_gains(P_eff, engine)
@@ -208,36 +219,33 @@ def sample_track_a(
             diag_tag_g.append(g_tg.detach().cpu().flatten()[:512])
             diag_exact_g.append(g_ex.detach().cpu().flatten()[:512])
 
-        total_rate = u_tilted.sum(dim=-1)  # [B, L_max]
-        p_unmask = 1.0 - torch.exp(-da * total_rate)
-        jump_now = is_masked & (torch.rand_like(p_unmask) < p_unmask)
+        # Exact schedule-matched conditional unmasking probability da / (1 - alpha)
+        p_unmask = min(1.0, (da * (1.0 + cfg.remask_eta * a_scalar)) / max(1.0 - a_scalar, 1e-4))
+        jump_now = is_masked & (torch.rand((batch_size, L_max), device=device) < p_unmask)
         if step == num_steps - 1:
             jump_now = is_masked
 
-        dest_probs = (u_tilted / (total_rate.unsqueeze(-1) + 1e-12)).clamp(min=1e-12)
-        dest_probs = dest_probs / dest_probs.sum(dim=-1, keepdim=True)
-        sampled = torch.multinomial(dest_probs.view(-1, VOCAB_SIZE), 1).view(batch_size, L_max)
+        safe_probs = dest_probs.clamp(min=1e-12)
+        safe_probs = safe_probs / safe_probs.sum(dim=-1, keepdim=True)
+        sampled = torch.multinomial(safe_probs.view(-1, VOCAB_SIZE), 1).view(batch_size, L_max)
         x = torch.where(jump_now, sampled, x)
 
-        # Optional zero-flux stochastic remasking corrector for step < num_steps - 1
-        if cfg.remask_eta > 0.0 and step < num_steps - 1 and a_scalar > 0.02:
+        if cfg.remask_eta > 0.0 and step < num_steps - 1 and a_scalar > 0.05:
             p_remask = 1.0 - math.exp(-da * cfg.remask_eta)
-            can_remask = (~is_masked) & (x != PAD_ID if fixed_length is not None else torch.ones_like(is_masked))
-            remask_now = can_remask & (torch.rand_like(p_unmask) < p_remask)
+            remask_now = (~is_masked) & active_chain & (torch.rand((batch_size, L_max), device=device) < p_remask)
             x = torch.where(remask_now, torch.full_like(x, MASK_ID), x)
 
-    # Final clean posterior evaluation at alpha = 1.0 for Part 1B handoff
     final_logits = denoiser(x, torch.ones(batch_size, device=device)) / max(cfg.temperature, 1e-3)
     P_final = torch.softmax(final_logits, dim=-1)
-    # Blend denoiser posterior with realized trajectory state so 1A steering transfers into 1B
     realized_oh = F.one_hot(x.clamp(max=PAD_ID), num_classes=VOCAB_SIZE).to(P_final.dtype)
     P_handoff = 0.65 * P_final + 0.35 * realized_oh
 
     if use_part_1b:
         decoded_rows = []
         for b in range(batch_size):
+            fix_L_b = fixed_length if fixed_length is not None else None
             seq_b, _, _ = coupled_decode_single(
-                P_handoff[b], engine, cfg, run_swaps=run_swaps_1b, fixed_length=fixed_length
+                P_handoff[b], engine, cfg, run_swaps=run_swaps_1b, fixed_length=fix_L_b
             )
             decoded_rows.append(seq_b)
         x = torch.stack(decoded_rows, dim=0)

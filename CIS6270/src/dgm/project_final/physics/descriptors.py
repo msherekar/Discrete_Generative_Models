@@ -91,9 +91,9 @@ def debye_scd_kernel(
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """
-    Build symmetric zero-diagonal L_max x L_max Debye-Huckel salt-screened SCD matrix:
-        W_ij = |j - i|^(1/2) * exp(-kappa_D(salt_mM, T) * |j - i|)  for i != j.
-    At salt_mM <= 0, kappa_D = 0, recovering unscreened Sawle & Ghosh SCD.
+    Build symmetric zero-diagonal L_max x L_max Gaussian-chain salt-screened SCD matrix:
+        W_ij = |j - i|^(1/2) * exp(-kappa_D * b * |j - i|^(1/2))  for i != j.
+    Uses random-coil RMS distance R_ij = b * sqrt(|j - i|) (Sawle & Ghosh / Huihui & Ghosh).
     """
     idx = torch.arange(L_max, device=device, dtype=dtype)
     dist = (idx[:, None] - idx[None, :]).abs()
@@ -101,11 +101,10 @@ def debye_scd_kernel(
         kappa_per_res = 0.0
     else:
         ionic_M = salt_mM / 1000.0
-        # Debye screening length in nm (~0.304 / sqrt(I) at 298 K) vs C_alpha step 0.38 nm
         debye_nm = (0.304 / math.sqrt(ionic_M)) * math.sqrt(max(temp_K, 250.0) / 298.15)
         kappa_per_res = 0.38 / debye_nm
-    W = torch.where(dist > 0, dist.sqrt() * torch.exp(-kappa_per_res * dist), torch.zeros_like(dist))
-    return W
+    root_d = dist.sqrt()
+    return torch.where(dist > 0, root_d * torch.exp(-kappa_per_res * root_d), torch.zeros_like(dist))
 
 
 def shd_kernel(

@@ -152,21 +152,21 @@ def make_user_task(
 
 
 def get_preset_tasks(L_max: int = 128) -> Dict[str, TaskSpec]:
-    """Return the four ICML responsive-material benchmark tasks (T1-T4)."""
+    """Return physically calibrated ICML responsive-material benchmark tasks (T1-T4)."""
     t1 = TaskSpec(
         name="T1_dual_pH",
         L_min=40,
         L_max=L_max,
         target_aro_frac=0.10,
-        aro_bounds=(0.07, 0.13),
+        aro_bounds=(0.06, 0.14),
         conditions=[
             EnvConditionSpec(
                 name="phys_pH74",
                 pH=7.4,
                 salt_mM=150.0,
                 temp_K=310.0,
-                target_ncpr=-0.15,
-                ncpr_bounds=(-0.19, -0.11),
+                target_ncpr=-0.10,
+                ncpr_bounds=(-0.14, -0.06),
             ),
             EnvConditionSpec(
                 name="acidic_pH55",
@@ -174,7 +174,7 @@ def get_preset_tasks(L_max: int = 128) -> Dict[str, TaskSpec]:
                 salt_mM=150.0,
                 temp_K=310.0,
                 target_ncpr=0.00,
-                ncpr_bounds=(-0.05, 0.05),
+                ncpr_bounds=(-0.04, 0.04),
             ),
         ],
     )
@@ -185,22 +185,22 @@ def get_preset_tasks(L_max: int = 128) -> Dict[str, TaskSpec]:
         L_max=L_max,
         conditions=[
             EnvConditionSpec(
-                name="low_salt_50mM",
+                name="low_salt_10mM",
                 pH=7.4,
-                salt_mM=50.0,
+                salt_mM=10.0,
                 temp_K=298.15,
                 target_ncpr=0.00,
                 ncpr_bounds=(-0.05, 0.05),
                 target_fcr=0.36,
-                fcr_bounds=(0.30, 0.44),
-                target_scd=-2.20,
+                fcr_bounds=(0.28, 0.45),
+                target_scd=-0.55,
             ),
             EnvConditionSpec(
                 name="high_salt_500mM",
                 pH=7.4,
                 salt_mM=500.0,
                 temp_K=298.15,
-                target_scd=-0.45,
+                target_scd=0.06,
             ),
         ],
     )
@@ -209,8 +209,8 @@ def get_preset_tasks(L_max: int = 128) -> Dict[str, TaskSpec]:
         name="T3_thermo_assembly",
         L_min=40,
         L_max=L_max,
-        target_aro_frac=0.10,
-        aro_bounds=(0.08, 0.13),
+        target_aro_frac=0.11,
+        aro_bounds=(0.07, 0.15),
         penalize_sticker_clumps=True,
         min_sticker_sep=5,
         conditions=[
@@ -221,14 +221,14 @@ def get_preset_tasks(L_max: int = 128) -> Dict[str, TaskSpec]:
                 temp_K=285.0,
                 target_ncpr=0.00,
                 ncpr_bounds=(-0.05, 0.05),
-                target_shd=5.20,
+                target_shd=1.08,
             ),
             EnvConditionSpec(
-                name="warm_320K",
+                name="warm_330K",
                 pH=7.0,
                 salt_mM=150.0,
-                temp_K=320.0,
-                target_shd=5.80,
+                temp_K=330.0,
+                target_shd=1.20,
             ),
         ],
     )
@@ -238,28 +238,28 @@ def get_preset_tasks(L_max: int = 128) -> Dict[str, TaskSpec]:
         L_min=40,
         L_max=L_max,
         target_aro_frac=0.10,
-        aro_bounds=(0.07, 0.13),
+        aro_bounds=(0.06, 0.14),
         penalize_sticker_clumps=True,
         min_sticker_sep=5,
         conditions=[
             EnvConditionSpec(
                 name="soluble_pH74_highSalt",
                 pH=7.4,
-                salt_mM=300.0,
+                salt_mM=400.0,
                 temp_K=310.0,
-                target_ncpr=-0.14,
-                ncpr_bounds=(-0.18, -0.10),
-                target_scd=-0.60,
+                target_ncpr=-0.10,
+                ncpr_bounds=(-0.14, -0.06),
+                target_scd=0.05,
             ),
             EnvConditionSpec(
                 name="assembly_pH55_lowSalt",
                 pH=5.5,
-                salt_mM=50.0,
+                salt_mM=15.0,
                 temp_K=290.0,
                 target_ncpr=0.00,
-                ncpr_bounds=(-0.05, 0.05),
-                target_scd=-1.80,
-                target_shd=5.30,
+                ncpr_bounds=(-0.04, 0.04),
+                target_scd=-0.40,
+                target_shd=1.12,
             ),
         ],
     )
