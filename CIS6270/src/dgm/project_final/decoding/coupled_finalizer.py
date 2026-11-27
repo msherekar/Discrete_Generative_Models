@@ -1,345 +1,264 @@
 """
-Vectorized 21-token biophysical sequence descriptors and quadratic interaction kernels.
+Part 1B: Coupled Constraint-Preserving Discretization Operator.
 
-All 1-body and 2-body environmental objectives are represented in the unified form:
-    R_k(x) = sum_i a_tilde_k(x_i) + 0.5 * sum_{i != j} W_ij^(k) * phi_k(x_i) * phi_k(x_j)
-with strict zero weight on the padding token (<PAD>, index 20) so variable-length
-sequences on a canvas of size L_max are evaluated without ratio-expectation bias.
+Replaces independent per-position argmax on terminal probability matrices P [L_max, 21]
+with a three-stage coupled projection:
+  Stage 1: Contiguous variable-length decomposition over L in [L_min, L_max].
+  Stage 2: KL-minimal Sinkhorn/dual exponential tilting + suffix-feasible beam rounding.
+  Stage 3: Vectorized O(1)-delta composition-preserving pairwise swap refinement.
 """
 
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from dgm.project_final.config import TaskSpec
+from dgm.project_final.config import SamplerConfig
+from dgm.project_final.physics.descriptors import PAD_ID, BiophysicalEngine
 
 
-# ==============================================================================
-# 1. Vocabulary & Canonical Amino Acid Lookup Constants
-# ==============================================================================
-AA20: str = "ACDEFGHIKLMNPQRSTVWY"
-PAD_TOKEN: str = "<PAD>"
-VOCAB: List[str] = list(AA20) + [PAD_TOKEN]
-AA_TO_ID: Dict[str, int] = {tok: i for i, tok in enumerate(VOCAB)}
-PAD_ID: int = 20
-VOCAB_SIZE: int = 21
-
-# Standard side-chain pKa values for Henderson-Hasselbalch ionization
-ACIDIC_PKA: Dict[str, float] = {"D": 3.9, "E": 4.1, "C": 8.3, "Y": 10.1}
-BASIC_PKA: Dict[str, float] = {"H": 6.0, "K": 10.5, "R": 12.5}
-
-# CALVADOS / Urry normalized hydropathy scale (lambda in [0, 1]) at 298.15 K
-CALVADOS_HYDRO_20: Dict[str, float] = {
-    "A": 0.73, "C": 0.60, "D": 0.09, "E": 0.05, "F": 0.95,
-    "G": 0.65, "H": 0.50, "I": 0.90, "K": 0.14, "L": 0.92,
-    "M": 0.83, "N": 0.37, "P": 0.76, "Q": 0.39, "R": 0.72,
-    "S": 0.59, "T": 0.67, "V": 0.83, "W": 0.98, "Y": 0.94,
-}
-
-
-# ==============================================================================
-# 2. User-Parameterized Physical Property Builders (Any pH, Salt, Temperature)
-# ==============================================================================
-def henderson_hasselbalch_charges(
-    pH: float, device: torch.device = torch.device("cpu"), dtype: torch.dtype = torch.float32
+def sinkhorn_dual_tilt(
+    log_P_aa: torch.Tensor,
+    G: torch.Tensor,
+    lo_sum: torch.Tensor,
+    hi_sum: torch.Tensor,
+    steps: int = 150,
+    lr: float = 0.25,
 ) -> torch.Tensor:
     """
-    Compute exact side-chain charge q(v; pH) for all 20 amino acids + <PAD>=0
-    at ANY user-specified pH using the Henderson-Hasselbalch equation.
+    Stage 2a: Solve min_Q sum_i KL(Q_i || P_aa_i) subject to E_Q[sum_i g_m(x_i)] in [lo_sum, hi_sum]
+    via dual Bregman/Sinkhorn exponential tilting Q*_{i,v} proportional to P_{i,v} exp(-lam^T g(v)).
     """
-    charges: List[float] = []
-    for aa in AA20:
-        if aa in ACIDIC_PKA:
-            q = -1.0 / (1.0 + 10.0 ** (ACIDIC_PKA[aa] - pH))
-        elif aa in BASIC_PKA:
-            q = +1.0 / (1.0 + 10.0 ** (pH - BASIC_PKA[aa]))
-        else:
-            q = 0.0
-        charges.append(q)
-    charges.append(0.0)  # <PAD> carries strictly zero charge
-    return torch.tensor(charges, device=device, dtype=dtype)
+    if G.numel() == 0:
+        return torch.log_softmax(log_P_aa, dim=-1)
+
+    lam = torch.zeros(G.size(0), device=log_P_aa.device, dtype=log_P_aa.dtype)
+    L = float(log_P_aa.size(0))
+    step_lr = lr / max(L * 0.05, 1.0)
+
+    for _ in range(steps):
+        log_Q = torch.log_softmax(log_P_aa - torch.matmul(lam, G).unsqueeze(0), dim=-1)
+        Q = log_Q.exp()
+        expected_sums = torch.matmul(Q, G.T).sum(dim=0)  # [M]
+        over = (expected_sums - hi_sum).clamp(min=0.0)
+        under = (lo_sum - expected_sums).clamp(min=0.0)
+        grad = over - under
+        if grad.abs().max().item() < 1e-3:
+            break
+        lam = (lam + step_lr * grad).clamp(-25.0, 25.0)
+
+    return torch.log_softmax(log_P_aa - torch.matmul(lam, G).unsqueeze(0), dim=-1)
 
 
-def thermo_hydropathy(
-    temp_K: float, device: torch.device = torch.device("cpu"), dtype: torch.dtype = torch.float32
-) -> torch.Tensor:
+def feasible_beam_round(
+    log_Q: torch.Tensor,
+    G: torch.Tensor,
+    lo_sum: torch.Tensor,
+    hi_sum: torch.Tensor,
+    beam_width: int = 64,
+) -> Tuple[Optional[torch.Tensor], bool]:
     """
-    Compute temperature-modulated hydropathy lambda(v; T) for 20 AAs + <PAD>=0.
-    Captures strengthening of hydrophobic solvation penalty with temperature
-    around T0 = 298.15 K while clamping <PAD> strictly to 0.0.
+    Stage 2b: Discretize tilted marginals log_Q [L, 20] into a hard sequence x in {0..19}^L
+    maximizing sum_i log Q_{i, x_i} while strictly satisfying all M box constraints via
+    look-ahead suffix min/max pruning.
     """
-    delta_t = (temp_K - 298.15) / 100.0
-    vals: List[float] = []
-    for aa in AA20:
-        base = CALVADOS_HYDRO_20[aa]
-        # Non-polar/aromatic side chains exhibit mild positive thermal shift
-        shift = 0.08 * delta_t if base > 0.65 else -0.03 * delta_t
-        vals.append(max(0.01, min(1.20, base + shift)))
-    vals.append(0.0)  # <PAD> = 0
-    return torch.tensor(vals, device=device, dtype=dtype)
+    L, V_aa = log_Q.shape
+    if G.numel() == 0:
+        return log_Q.argmax(dim=-1), True
+
+    M = G.size(0)
+    g_min = G.min(dim=-1).values  # [M]
+    g_max = G.max(dim=-1).values  # [M]
+    tol = 1e-4
+
+    # Represent beam states compactly on CPU/GPU tensors: scores [B], sums [B, M], seqs [B, i]
+    scores = torch.zeros((1,), device=log_Q.device, dtype=log_Q.dtype)
+    sums = torch.zeros((1, M), device=log_Q.device, dtype=log_Q.dtype)
+    seqs = torch.empty((1, 0), device=log_Q.device, dtype=torch.long)
+
+    for i in range(L):
+        rem = float(L - 1 - i)
+        # Expand all B current states by V_aa = 20 candidate amino acids -> [B, 20, M]
+        cand_sums = sums.unsqueeze(1) + G.T.unsqueeze(0)  # [B, 20, M]
+        cand_scores = scores.unsqueeze(1) + log_Q[i].unsqueeze(0)  # [B, 20]
+
+        can_reach_lo = (cand_sums + rem * g_max.view(1, 1, M) >= lo_sum.view(1, 1, M) - tol).all(dim=-1)
+        can_reach_hi = (cand_sums + rem * g_min.view(1, 1, M) <= hi_sum.view(1, 1, M) + tol).all(dim=-1)
+        valid = can_reach_lo & can_reach_hi  # [B, 20]
+
+        flat_valid = torch.nonzero(valid, as_tuple=False)
+        if flat_valid.numel() == 0:
+            return None, False
+
+        b_idx, v_idx = flat_valid[:, 0], flat_valid[:, 1]
+        valid_scores = cand_scores[b_idx, v_idx]
+        k = min(beam_width, valid_scores.numel())
+        top_pos = torch.topk(valid_scores, k=k, largest=True).indices
+
+        sel_b, sel_v = b_idx[top_pos], v_idx[top_pos]
+        scores = valid_scores[top_pos]
+        sums = cand_sums[sel_b, sel_v]
+        seqs = torch.cat([seqs[sel_b], sel_v.unsqueeze(1)], dim=1)
+
+    return seqs[0], True
 
 
-def debye_scd_kernel(
-    L_max: int,
-    salt_mM: float,
-    temp_K: float = 298.15,
-    device: torch.device = torch.device("cpu"),
-    dtype: torch.dtype = torch.float32,
-) -> torch.Tensor:
+def refine_pairwise_swaps(
+    seq: torch.Tensor,
+    log_P_aa: torch.Tensor,
+    engine: BiophysicalEngine,
+    max_swaps: int = 150,
+) -> Tuple[torch.Tensor, float]:
     """
-    Build symmetric zero-diagonal L_max x L_max Debye-Huckel salt-screened SCD matrix:
-        W_ij = |j - i|^(1/2) * exp(-kappa_D(salt_mM, T) * |j - i|)  for i != j.
-    At salt_mM <= 0, kappa_D = 0, recovering unscreened Sawle & Ghosh SCD.
+    Stage 3: Vectorized composition-preserving pairwise swap climb over U(x):
+        U(x) = sum_{i=1}^L log P_aa[i, x_i] - sum_{k in 2body} beta_k * R_k(x)^2.
+    Evaluates ALL L*(L-1)/2 candidate swaps in O(L^2) tensor ops per iteration
+    (O(1) amortized per pair) while leaving 1-body counts 100% invariant (Theorem 3).
     """
-    idx = torch.arange(L_max, device=device, dtype=dtype)
-    dist = (idx[:, None] - idx[None, :]).abs()
-    if salt_mM <= 0.0:
-        kappa_per_res = 0.0
+    seq = seq.clone()
+    L = seq.numel()
+    idx_L = torch.arange(L, device=seq.device)
+    cur_logp = log_P_aa[idx_L, seq].sum().item()
+
+    pair_objs = [o for o in engine.objectives if o.kind == "2body" and o.swap_weight > 0.0]
+    if not pair_objs or max_swaps <= 0 or L <= 1:
+        # Compute initial U even if swaps are disabled (Stage-2-only ablation)
+        pen = 0.0
+        for o in pair_objs:
+            phi_v = o.phi[seq]
+            W_sub = o.W[:L, :L]
+            r_val = o.a_tilde[seq].sum() + 0.5 * (phi_v @ (W_sub @ phi_v))
+            pen += o.swap_weight * float(r_val.item() ** 2)
+        return seq, cur_logp - pen
+
+    # Cache W_sub, phi_vec, s_vec = W_sub @ phi_vec, and scalar R_k for each 2-body objective
+    W_list = [o.W[:L, :L] for o in pair_objs]
+    phi_vecs = [o.phi[seq] for o in pair_objs]
+    s_vecs = [W_sub @ pv for W_sub, pv in zip(W_list, phi_vecs)]
+    R_vals = [
+        (o.a_tilde[seq].sum() + 0.5 * (pv @ sv)).item()
+        for o, pv, sv in zip(pair_objs, phi_vecs, s_vecs)
+    ]
+    betas = [o.swap_weight for o in pair_objs]
+    upper_mask = torch.triu(torch.ones((L, L), device=seq.device, dtype=torch.bool), diagonal=1)
+
+    for _ in range(max_swaps):
+        # 1. Exact log-likelihood change matrix for swapping slot i <-> slot j: [L, L]
+        lp_i_at_j = log_P_aa[:, seq]  # entry [i, j] is log_P_aa[i, seq[j]]
+        cur_lp_i = log_P_aa[idx_L, seq]
+        d_logp = (lp_i_at_j + lp_i_at_j.T) - (cur_lp_i.unsqueeze(1) + cur_lp_i.unsqueeze(0))
+
+        # 2. Exact pairwise penalty change across all (i, j) pairs simultaneously
+        d_pen = torch.zeros_like(d_logp)
+        dR_mats = []
+        for W_sub, pv, sv, r_cur, beta in zip(W_list, phi_vecs, s_vecs, R_vals, betas):
+            # delta_ij = phi[seq[j]] - phi[seq[i]]
+            delta_ij = pv.unsqueeze(0) - pv.unsqueeze(1)
+            dR = delta_ij * (sv.unsqueeze(1) - sv.unsqueeze(0)) - (delta_ij ** 2) * W_sub
+            dR_mats.append(dR)
+            d_pen = d_pen + beta * ((r_cur + dR) ** 2 - (r_cur ** 2))
+
+        same_tok = seq.unsqueeze(1) == seq.unsqueeze(0)
+        delta_U = torch.where(upper_mask & (~same_tok), d_logp - d_pen, torch.full_like(d_logp, -1e9))
+
+        best_gain = delta_U.max().item()
+        if best_gain <= 1e-7:
+            break
+
+        flat_idx = int(delta_U.argmax().item())
+        i_sw, j_sw = flat_idx // L, flat_idx % L
+        cur_logp += float(d_logp[i_sw, j_sw].item())
+
+        # Update cached fields in O(L) and swap tokens in-place
+        for idx_k, (o, W_sub) in enumerate(zip(pair_objs, W_list)):
+            d_phi = float((phi_vecs[idx_k][j_sw] - phi_vecs[idx_k][i_sw]).item())
+            R_vals[idx_k] += float(dR_mats[idx_k][i_sw, j_sw].item())
+            s_vecs[idx_k] = s_vecs[idx_k] + d_phi * (W_sub[:, i_sw] - W_sub[:, j_sw])
+            phi_vecs[idx_k][i_sw], phi_vecs[idx_k][j_sw] = (
+                phi_vecs[idx_k][j_sw].clone(),
+                phi_vecs[idx_k][i_sw].clone(),
+            )
+        seq[i_sw], seq[j_sw] = seq[j_sw].clone(), seq[i_sw].clone()
+
+    total_pen = sum(b * (r ** 2) for b, r in zip(betas, R_vals))
+    return seq, cur_logp - total_pen
+
+
+def coupled_decode_single(
+    P_final: torch.Tensor,
+    engine: BiophysicalEngine,
+    cfg: SamplerConfig,
+    run_swaps: bool = True,
+    fixed_length: Optional[int] = None,
+) -> Tuple[torch.Tensor, int, Dict[str, float]]:
+    """
+    Run full Part 1B decoding on a single [L_max, 21] probability matrix.
+    Returns right-padded [L_max] integer tensor, optimal length L*, and diagnostics.
+    """
+    P_clamped = P_final.clamp(min=1e-12)
+    P_clamped = P_clamped / P_clamped.sum(dim=-1, keepdim=True)
+    log_P = P_clamped.log()
+    L_max = P_clamped.size(0)
+
+    G, lo_per_res, hi_per_res = engine.get_linear_constraint_tensors()
+
+    # Candidate contiguous lengths L in [L_min, L_max]
+    if fixed_length is not None:
+        cand_lengths = [fixed_length]
     else:
-        ionic_M = salt_mM / 1000.0
-        # Debye screening length in nm (~0.304 / sqrt(I) at 298 K) vs C_alpha step 0.38 nm
-        debye_nm = (0.304 / math.sqrt(ionic_M)) * math.sqrt(max(temp_K, 250.0) / 298.15)
-        kappa_per_res = 0.38 / debye_nm
-    W = torch.where(dist > 0, dist.sqrt() * torch.exp(-kappa_per_res * dist), torch.zeros_like(dist))
-    return W
+        all_L = list(range(engine.task.L_min, min(engine.task.L_max, L_max) + 1))
+        log_non_pad = (1.0 - P_clamped[:, PAD_ID]).clamp(min=1e-12).log()
+        log_pad = log_P[:, PAD_ID]
+        len_priors = [
+            float(log_non_pad[:L].sum().item() + log_pad[L:].sum().item()) for L in all_L
+        ]
+        ranked = sorted(zip(len_priors, all_L), reverse=True)[: cfg.top_k_lengths]
+        cand_lengths = [L for _, L in ranked]
 
+    best_total = -float("inf")
+    best_aa_seq: Optional[torch.Tensor] = None
+    best_L = cand_lengths[0]
 
-def shd_kernel(
-    L_max: int,
-    beta: float = 1.0,
-    device: torch.device = torch.device("cpu"),
-    dtype: torch.dtype = torch.float32,
-) -> torch.Tensor:
-    """Build symmetric zero-diagonal L_max x L_max SHD matrix W_ij = |j - i|^(-beta)."""
-    idx = torch.arange(L_max, device=device, dtype=dtype)
-    dist = (idx[:, None] - idx[None, :]).abs()
-    return torch.where(dist > 0, dist.clamp(min=1.0).pow(-beta), torch.zeros_like(dist))
+    for L in cand_lengths:
+        P_aa = P_clamped[:L, :20]
+        P_aa = P_aa / P_aa.sum(dim=-1, keepdim=True).clamp(min=1e-12)
+        log_P_aa = P_aa.clamp(min=1e-12).log()
 
-
-def sticker_clumping_kernel(
-    L_max: int,
-    min_sep: int = 5,
-    device: torch.device = torch.device("cpu"),
-    dtype: torch.dtype = torch.float32,
-) -> torch.Tensor:
-    """Penalize aromatic stickers (Y, F, W) placed closer than `min_sep` residues."""
-    idx = torch.arange(L_max, device=device, dtype=dtype)
-    dist = (idx[:, None] - idx[None, :]).abs()
-    mask = (dist > 0) & (dist < float(min_sep))
-    return torch.where(mask, (float(min_sep) - dist) / float(max(min_sep, 1)), torch.zeros_like(dist))
-
-
-# ==============================================================================
-# 3. Unified Objective & Linear Constraint Containers
-# ==============================================================================
-@dataclass
-class ObjectiveTerm:
-    """Single 1-body + 2-body residual R_k(x) used in Part 1A & Part 1B Stage 3."""
-
-    name: str
-    kind: str  # "1body" or "2body"
-    a_tilde: torch.Tensor  # [21]
-    phi: torch.Tensor      # [21]
-    W: torch.Tensor        # [L_max, L_max], symmetric with zero diagonal
-    target: float
-    swap_weight: float = 1.0
-
-
-@dataclass
-class LinearConstraintSpec:
-    """Hard per-residue 1-body box constraint sum_i g(x_i) in [L * lo, L * hi] for Part 1B."""
-
-    name: str
-    g_aa20: torch.Tensor  # [20] values over canonical amino acids
-    lo_per_res: float
-    hi_per_res: float
-
-
-class BiophysicalEngine:
-    """
-    Compiles any user TaskSpec into GPU-ready 21-token vectors and L_max x L_max
-    matrices for Part 1A trajectory guidance and Part 1B coupled decoding.
-    """
-
-    def __init__(
-        self,
-        task: TaskSpec,
-        device: torch.device = torch.device("cpu"),
-        dtype: torch.dtype = torch.float32,
-    ) -> None:
-        self.task = task
-        self.L_max = task.L_max
-        self.device = device
-        self.dtype = dtype
-
-        self.active_m = torch.tensor([1.0] * 20 + [0.0], device=device, dtype=dtype)
-        self.aro_vec = torch.tensor(
-            [1.0 if aa in "YFW" else 0.0 for aa in AA20] + [0.0], device=device, dtype=dtype
+        lo_sum, hi_sum = float(L) * lo_per_res, float(L) * hi_per_res
+        log_Q = sinkhorn_dual_tilt(
+            log_P_aa, G, lo_sum, hi_sum, steps=cfg.sinkhorn_steps, lr=cfg.sinkhorn_lr
         )
-        self.zero_21 = torch.zeros(VOCAB_SIZE, device=device, dtype=dtype)
-        self.zero_W = torch.zeros((self.L_max, self.L_max), device=device, dtype=dtype)
+        seq_dp, ok = feasible_beam_round(log_Q, G, lo_sum, hi_sum, beam_width=cfg.beam_width)
+        if not ok or seq_dp is None:
+            continue
 
-        self.objectives: List[ObjectiveTerm] = []
-        self.linear_constraints: List[LinearConstraintSpec] = []
-        self._compile_task()
+        max_sw = cfg.max_swaps if run_swaps else 0
+        seq_ref, u_score = refine_pairwise_swaps(seq_dp, log_P_aa, engine, max_swaps=max_sw)
+        tail_pad_lp = float(log_P[L:, PAD_ID].sum().item()) if L < L_max else 0.0
+        # Normalize length objective slightly by active/tail log-prob sum
+        non_pad_mass = float((1.0 - P_clamped[:L, PAD_ID]).clamp(min=1e-12).log().sum().item())
+        total_score = u_score + non_pad_mass + tail_pad_lp
 
-    def _compile_task(self) -> None:
-        """Build all 1-body and 2-body objectives dynamically from user conditions."""
-        for cond in self.task.conditions:
-            q_vec = henderson_hasselbalch_charges(cond.pH, self.device, self.dtype)
-            fcr_vec = q_vec.abs()
+        if total_score > best_total:
+            best_total = total_score
+            best_aa_seq = seq_ref
+            best_L = L
 
-            if cond.target_ncpr is not None:
-                self.objectives.append(
-                    ObjectiveTerm(
-                        name=f"{cond.name}_ncpr",
-                        kind="1body",
-                        a_tilde=q_vec - cond.target_ncpr * self.active_m,
-                        phi=self.zero_21,
-                        W=self.zero_W,
-                        target=cond.target_ncpr,
-                        swap_weight=0.0,
-                    )
-                )
-            if cond.ncpr_bounds is not None:
-                self.linear_constraints.append(
-                    LinearConstraintSpec(
-                        name=f"{cond.name}_ncpr_box",
-                        g_aa20=q_vec[:20],
-                        lo_per_res=cond.ncpr_bounds[0],
-                        hi_per_res=cond.ncpr_bounds[1],
-                    )
-                )
-
-            if cond.target_fcr is not None:
-                self.objectives.append(
-                    ObjectiveTerm(
-                        name=f"{cond.name}_fcr",
-                        kind="1body",
-                        a_tilde=fcr_vec - cond.target_fcr * self.active_m,
-                        phi=self.zero_21,
-                        W=self.zero_W,
-                        target=cond.target_fcr,
-                        swap_weight=0.0,
-                    )
-                )
-            if cond.fcr_bounds is not None:
-                self.linear_constraints.append(
-                    LinearConstraintSpec(
-                        name=f"{cond.name}_fcr_box",
-                        g_aa20=fcr_vec[:20],
-                        lo_per_res=cond.fcr_bounds[0],
-                        hi_per_res=cond.fcr_bounds[1],
-                    )
-                )
-
-            if cond.target_scd is not None:
-                W_scd = debye_scd_kernel(self.L_max, cond.salt_mM, cond.temp_K, self.device, self.dtype)
-                self.objectives.append(
-                    ObjectiveTerm(
-                        name=f"{cond.name}_scd",
-                        kind="2body",
-                        a_tilde=-cond.target_scd * self.active_m,
-                        phi=q_vec,
-                        W=W_scd,
-                        target=cond.target_scd,
-                        swap_weight=self.task.swap_beta,
-                    )
-                )
-
-            if cond.target_shd is not None:
-                lam_vec = thermo_hydropathy(cond.temp_K, self.device, self.dtype)
-                W_shd = shd_kernel(self.L_max, cond.shd_beta, self.device, self.dtype)
-                self.objectives.append(
-                    ObjectiveTerm(
-                        name=f"{cond.name}_shd",
-                        kind="2body",
-                        a_tilde=-cond.target_shd * self.active_m,
-                        phi=lam_vec,
-                        W=W_shd,
-                        target=cond.target_shd,
-                        swap_weight=self.task.swap_beta,
-                    )
-                )
-
-        if self.task.target_aro_frac is not None:
-            W_stk = (
-                sticker_clumping_kernel(self.L_max, self.task.min_sticker_sep, self.device, self.dtype)
-                if self.task.penalize_sticker_clumps
-                else self.zero_W
-            )
-            kind = "2body" if self.task.penalize_sticker_clumps else "1body"
-            self.objectives.append(
-                ObjectiveTerm(
-                    name="aromatic_stickers",
-                    kind=kind,
-                    a_tilde=self.aro_vec - self.task.target_aro_frac * self.active_m,
-                    phi=self.aro_vec if self.task.penalize_sticker_clumps else self.zero_21,
-                    W=W_stk,
-                    target=self.task.target_aro_frac,
-                    swap_weight=self.task.swap_beta if self.task.penalize_sticker_clumps else 0.0,
-                )
-            )
-
-        if self.task.aro_bounds is not None:
-            self.linear_constraints.append(
-                LinearConstraintSpec(
-                    name="aro_frac_box",
-                    g_aa20=self.aro_vec[:20],
-                    lo_per_res=self.task.aro_bounds[0],
-                    hi_per_res=self.task.aro_bounds[1],
-                )
-            )
-
-    def get_linear_constraint_tensors(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Return stacked (G [M, 20], lo [M], hi [M]) for Part 1B Stage 2."""
-        if not self.linear_constraints:
-            empty = torch.zeros((0, 20), device=self.device, dtype=self.dtype)
-            b = torch.zeros((0,), device=self.device, dtype=self.dtype)
-            return empty, b, b
-        G = torch.stack([c.g_aa20 for c in self.linear_constraints], dim=0)
-        lo = torch.tensor([c.lo_per_res for c in self.linear_constraints], device=self.device, dtype=self.dtype)
-        hi = torch.tensor([c.hi_per_res for c in self.linear_constraints], device=self.device, dtype=self.dtype)
-        return G, lo, hi
-
-    def get_omega(self) -> torch.Tensor:
-        """Return unit-normalized Pareto weight vector omega [K] over active objectives."""
-        K = max(len(self.objectives), 1)
-        if self.task.omega is not None:
-            w = torch.tensor(self.task.omega, device=self.device, dtype=self.dtype)
-        else:
-            w = torch.ones(K, device=self.device, dtype=self.dtype) / float(K)
-        return w / (w.norm() + 1e-12)
-
-    def evaluate_discrete_tokens(self, seq_ids: Sequence[int]) -> Dict[str, float]:
-        """Compute exact intensive property values and residuals on an integer token list."""
-        aa_ids = [t for t in seq_ids if t != PAD_ID]
-        L = max(len(aa_ids), 1)
-        padded = torch.tensor(
-            aa_ids + [PAD_ID] * (self.L_max - len(aa_ids)), device=self.device, dtype=torch.long
+    # Graceful fallback to tilted argmax at midpoint length if strict box was empty
+    if best_aa_seq is None:
+        best_L = fixed_length or ((engine.task.L_min + engine.task.L_max) // 2)
+        P_aa = P_clamped[:best_L, :20]
+        P_aa = P_aa / P_aa.sum(dim=-1, keepdim=True).clamp(min=1e-12)
+        log_Q = sinkhorn_dual_tilt(
+            P_aa.clamp(min=1e-12).log(), G, best_L * lo_per_res, best_L * hi_per_res
         )
-        out: Dict[str, float] = {"length": float(len(aa_ids))}
-        for obj in self.objectives:
-            a_sum = obj.a_tilde[padded].sum()
-            phi_v = obj.phi[padded]
-            pair_sum = 0.5 * (phi_v @ (obj.W @ phi_v))
-            res = (a_sum + pair_sum).item()
-            out[f"residual_{obj.name}"] = res
-            out[f"value_{obj.name}"] = obj.target + (res / float(L))
-        return out
+        best_aa_seq, best_total = refine_pairwise_swaps(
+            log_Q.argmax(dim=-1), P_aa.clamp(min=1e-12).log(), engine, max_swaps=cfg.max_swaps
+        )
 
-
-def tokens_to_seq(seq_ids: Sequence[int]) -> str:
-    """Convert integer token sequence to clean 1-letter amino acid string (stripping <PAD>)."""
-    return "".join(AA20[t] for t in seq_ids if 0 <= t < 20)
-
-
-def seq_to_tokens(seq: str, L_max: int) -> torch.Tensor:
-    """Encode clean amino acid string into right-padded [L_max] integer tensor."""
-    trimmed = seq[:L_max]
-    ids = [AA_TO_ID[ch] for ch in trimmed] + [PAD_ID] * (L_max - len(trimmed))
-    return torch.tensor(ids, dtype=torch.long)
+    padded_out = torch.full((L_max,), PAD_ID, device=P_final.device, dtype=torch.long)
+    padded_out[:best_L] = best_aa_seq
+    diag = engine.evaluate_discrete_tokens(padded_out.tolist())
+    diag["objective_score"] = best_total
+    return padded_out, best_L, diag
