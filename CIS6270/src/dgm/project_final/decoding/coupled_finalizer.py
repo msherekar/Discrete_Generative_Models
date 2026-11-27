@@ -345,7 +345,7 @@ def coupled_decode_single(
         lo_sum, hi_sum = float(best_L) * lo_per_res, float(best_L) * hi_per_res
         log_Q = sinkhorn_dual_tilt(log_P_aa, G, lo_sum, hi_sum)
         repaired, _ = repair_to_feasible_box(log_Q.argmax(dim=-1), log_Q, G, lo_sum, hi_sum)
-        best__aa_seq, best_total = refine_pairwise_swaps(
+        best_aa_seq, best_total = refine_pairwise_swaps(
             repaired, log_P_aa, engine, max_swaps=cfg.max_swaps if run_swaps else 0
         )
 

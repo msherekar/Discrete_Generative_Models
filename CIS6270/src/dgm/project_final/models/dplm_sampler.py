@@ -132,7 +132,7 @@ class HuggingFaceDPLMWrapper(nn.Module):
             cfg.attn_backend = "sdpa"
 
         self.backbone = AutoModelForMaskedLM.from_pretrained(
-            resolved, config=cfg, trust_remote_code=True, torch_dtype=torch.bfloat32
+            resolved, config=cfg, trust_remote_code=True, torch_dtype=torch.float32
         )
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(resolved, trust_remote_code=True)
@@ -211,6 +211,7 @@ def sample_track_a(
         da = float((alphas[step + 1] - alphas[step]).item())
 
         logits = denoiser(x, a_cur) / max(cfg.temperature, 1e-3)
+        logits = torch.nan_to_num(logits, nan=0.0, posinf=20.0, neginf=-20.0)
         # Enforce contiguous active prefix (no mid-chain PAD) and PAD suffix
         logits[:, :, PAD_ID] = torch.where(active_chain, torch.full_like(logits[:, :, 0], -1e9), 10.0)
         logits[:, :, :20] = torch.where(active_chain.unsqueeze(-1), logits[:, :, :20], -1e9)
@@ -227,10 +228,11 @@ def sample_track_a(
             eff_cone = max(engine.task.cone_angle_deg, 55.0 - 25.0 * a_scalar)
             log_tilt, _ = compute_hypercone_log_tilt(
                 P_eff, is_masked, engine,
-                cone_angle_deg=eff_cone if mode == "1A" else engine.task.cone_angle_deg,
+                cone_angle_deg=eff_cone if mode in ("1A", "1A_1body", "MOG_TAG") else engine.task.cone_angle_deg,
                 gamma=engine.task.gamma,
                 mode=mode,
             )
+            log_tilt = torch.nan_to_num(log_tilt, nan=0.0, posinf=6.0, neginf=-6.0).clamp(-6.0, 6.0)
             tilted = apply_doob_rate_tilt(P, log_tilt)
             tilted[:, :, PAD_ID] = torch.where(active_chain, 0.0, 1.0)
             dest_probs = tilted / (tilted.sum(dim=-1, keepdim=True) + 1e-12)
@@ -247,8 +249,10 @@ def sample_track_a(
         if step == num_steps - 1:
             jump_now = is_masked
 
-        safe_probs = dest_probs.clamp(min=1e-12)
-        safe_probs = safe_probs / safe_probs.sum(dim=-1, keepdim=True)
+        safe_probs = torch.nan_to_num(dest_probs, nan=0.0, posinf=0.0, neginf=0.0).clamp(min=0.0)
+        row_sums = safe_probs.sum(dim=-1, keepdim=True)
+        uniform_fallback = torch.full_like(safe_probs, 1.0 / VOCAB_SIZE)
+        safe_probs = torch.where(row_sums > 1e-12, safe_probs / row_sums.clamp(min=1e-12), uniform_fallback)
         sampled = torch.multinomial(safe_probs.view(-1, VOCAB_SIZE), 1).view(batch_size, L_max)
         x = torch.where(jump_now, sampled, x)
 

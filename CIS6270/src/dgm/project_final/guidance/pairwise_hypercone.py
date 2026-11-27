@@ -64,10 +64,10 @@ def compute_exact_and_tag_gains(
 
 def signed_normalized_gains(values_1d: torch.Tensor) -> torch.Tensor:
     """
-    Scale-normalize gains into [-1, 1] per objective while preserving sign:
-      > 0 means improves objective, == 0 means chemically orthogonal, < 0 means harms objective.
+    Scale-normalize gains into [-1.5, 1.0] per objective while preserving sign:
+      > 0 improves objective, == 0 chemically orthogonal, < 0 harms/overshoots objective.
     """
-    scale = values_1d.abs().quantile(0.95).clamp(min=1e-6)
+    scale = values_1d.abs().quantile(0.95).clamp(min=1e-5)
     return (values_1d / scale).clamp(-1.5, 1.0)
 
 
@@ -75,14 +75,14 @@ def compute_hypercone_log_tilt(
     P: torch.Tensor,
     active_slot_mask: torch.Tensor,
     engine: BiophysicalEngine,
-    cone_angle_deg: float = 30.0,
+    cone_angle_deg: float = 45.0,
     gamma: float = 4.0,
     mode: str = "1A",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute multi-objective Doob h-transform log-rate tilt across candidate jumps.
-    Evaluates hypercone alignment over active/harmed objectives so chemically
-    neutral (zero-delta) dimensions in high-K tasks are not falsely penalized.
+    Preserves symmetric negative suppression for conflict/overshoot moves while gating
+    positive boosts via smooth Pareto hypercone alignment over active/harmed objectives.
     """
     one_body_only = mode == "1A_1body"
     use_tag = mode in ("TAG", "MOG_TAG")
@@ -90,6 +90,7 @@ def compute_hypercone_log_tilt(
 
     g_exact, g_tag, _ = compute_exact_and_tag_gains(P, engine, one_body_only=one_body_only)
     gains = g_tag if use_tag else g_exact  # [B, K, L_max, 21]
+    gains = torch.nan_to_num(gains, nan=0.0, posinf=1.0, neginf=-1.0)
     B, K, L, V = gains.shape
     omega = engine.get_omega()  # [K]
 
@@ -101,30 +102,39 @@ def compute_hypercone_log_tilt(
         for k in range(K):
             flat_vals = gains[b, k, slot_idx, :].reshape(-1)
             norm_g[b, k, slot_idx, :] = signed_normalized_gains(flat_vals).view(-1, V)
+    norm_g = torch.nan_to_num(norm_g, nan=0.0, posinf=1.0, neginf=-1.0)
 
+    slot_gate = active_slot_mask.unsqueeze(-1).to(gains.dtype)
     dir_score = torch.einsum("bklv,k->blv", norm_g, omega)
-    if mode == "TAG":
-        gate = active_slot_mask.unsqueeze(-1).to(gains.dtype).expand_as(dir_score)
-        return gamma * gate * dir_score, gate
 
-    has_pos = dir_score > 1e-6
-    if not use_cone or cone_angle_deg >= 89.0:
-        gate = (has_pos & active_slot_mask.unsqueeze(-1)).to(gains.dtype)
-        return gamma * gate * dir_score.clamp(min=0.0), gate
+    if mode == "TAG" or not use_cone or cone_angle_deg >= 89.0:
+        log_tilt = (gamma * slot_gate * dir_score).clamp(-6.0, 6.0)
+        return log_tilt, slot_gate.expand_as(dir_score)
 
-    # Active/harmed mask: include objective k if move touches it (|g_k| > 0.05) OR harms it (g_k < -0.01)
-    touched = ((norm_g.abs() > 0.05) | (norm_g < -0.01)).to(gains.dtype)  # [B, K, L, V]
+    # Dimension-aware cone floor so high-K tasks (e.g. T4 with K=5) do not over-prune valid moves
+    eff_angle = max(cone_angle_deg, 52.0 if K >= 4 else 42.0)
+    cos_thresh = math.cos(math.radians(eff_angle))
+
+    # Active/harmed subspace: include objective k if move touches it (|g_k| > 0.05) OR harms it (g_k < -0.02)
+    touched = ((norm_g.abs() > 0.05) | (norm_g < -0.02)).to(gains.dtype)
     omega_sub = touched * omega.view(1, K, 1, 1)
     sub_dot = (norm_g * omega_sub).sum(dim=1)
-    g_sub_norm = (norm_g * touched).norm(dim=1) + 1e-12
-    w_sub_norm = omega_sub.norm(dim=1) + 1e-12
+    g_sub_norm = (norm_g * touched).norm(dim=1) + 1e-8
+    w_sub_norm = omega_sub.norm(dim=1) + 1e-8
     cos_alpha = (sub_dot / (g_sub_norm * w_sub_norm)).clamp(-1.0, 1.0)
 
-    cos_thresh = math.cos(math.radians(cone_angle_deg))
-    gate = (has_pos & (cos_alpha >= cos_thresh - 1e-7) & active_slot_mask.unsqueeze(-1)).to(gains.dtype)
-    return gamma * gate * dir_score.clamp(min=0.0), gate
+    # Smooth cone weight in [0, 1] for positive gains + hard veto if any weighted objective is badly harmed
+    worst_harm = (norm_g * (omega.view(1, K, 1, 1) > 0).to(gains.dtype)).amin(dim=1)
+    no_severe_conflict = (worst_harm >= -0.35).to(gains.dtype)
+    cone_weight = ((cos_alpha - cos_thresh) / 0.18).clamp(0.0, 1.0) * no_severe_conflict
 
+    pos_part = dir_score.clamp(min=0.0) * cone_weight
+    neg_part = dir_score.clamp(max=0.0)
+    steered_score = pos_part + neg_part
 
+    log_tilt = (gamma * slot_gate * steered_score).clamp(-6.0, 6.0)
+    active_cone_gate = (slot_gate * (cone_weight > 0.0).to(gains.dtype))
+    return log_tilt, active_cone_gate
 
 
 def apply_doob_rate_tilt(

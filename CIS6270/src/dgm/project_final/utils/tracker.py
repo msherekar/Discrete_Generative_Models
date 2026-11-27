@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from dgm.project_final.config import EVAL_DIR, WANDB_DIR, ensure_project_dirs
+from dgm.project_final.config import BASE_CIS_DIR, EVAL_DIR, WANDB_DIR, ensure_project_dirs
 
 try:
     import wandb
@@ -20,11 +20,27 @@ except ImportError:
     wandb = None
     HAS_WANDB = False
 
+_WANDB_TAG_MAX = 64
+
+
+def _wandb_safe_tag(tag: str) -> str:
+    """Clamp a WandB tag to the 1–64 character API limit."""
+    t = tag.strip()
+    if not t:
+        return "tag"
+    return t[:_WANDB_TAG_MAX]
+
+
+def _short_exp_tag(exp_id: str) -> str:
+    """Use the leading exp-tag segment (e.g. baseline5seed) as a filterable WandB tag."""
+    return _wandb_safe_tag(exp_id.split("_", 1)[0])
+
 
 class ExperimentTracker:
     """
     Manages WandB run lifecycle + local JSONL step logs and summary JSON exports.
-    Automatically points WANDB_DIR to /home/mukulsherekar/.../CIS6270/wandb.
+    Passes `BASE_CIS_DIR` as `dir` to `wandb.init` so WandB writes directly into
+    `BASE_CIS_DIR / "wandb"` without creating a nested `wandb/wandb` folder.
     """
 
     def __init__(
@@ -34,18 +50,37 @@ class ExperimentTracker:
         job_type: str,
         config: Dict[str, Any],
         tags: Optional[Sequence[str]] = None,
+        exp_dir: Optional[Path] = None,
+        exp_id: Optional[str] = None,
         project: str = "cis6270-responsive-idp-dgm",
         entity: Optional[str] = None,
         mode: str = "online",  # "online", "offline", or "disabled"
     ) -> None:
         ensure_project_dirs()
-        os.environ["WANDB_DIR"] = str(WANDB_DIR)
+        # WandB automatically appends `/wandb` to `WANDB_DIR` / `dir`!
+        wandb_root_parent = WANDB_DIR.parent if WANDB_DIR.name == "wandb" else BASE_CIS_DIR
+        os.environ["WANDB_DIR"] = str(wandb_root_parent)
 
         self.run_name = run_name
-        self.local_dir = EVAL_DIR / "runs" / group
+        self.exp_id = exp_id
+        base_eval_dir = exp_dir if exp_dir is not None else EVAL_DIR
+        self.local_dir = base_eval_dir / "runs" / group
         self.local_dir.mkdir(parents=True, exist_ok=True)
         self.step_log_path = self.local_dir / f"{run_name}_steps.jsonl"
         self.summary_path = self.local_dir / f"{run_name}_summary.json"
+
+        # Full exp_id belongs in name/group/config; tags must stay <= 64 chars.
+        wb_name = f"{exp_id}__{run_name}" if exp_id else run_name
+        wb_group = f"{exp_id}__{group}" if exp_id else group
+        wb_tags = [_wandb_safe_tag(t) for t in (tags or []) if str(t).strip()]
+        if exp_id:
+            short = _short_exp_tag(exp_id)
+            if short not in wb_tags:
+                wb_tags.insert(0, short)
+
+        full_config = dict(config)
+        if exp_id:
+            full_config["exp_id"] = exp_id
 
         self.enabled = HAS_WANDB and (mode != "disabled")
         self.run = None
@@ -53,14 +88,14 @@ class ExperimentTracker:
             self.run = wandb.init(
                 project=project,
                 entity=entity,
-                name=run_name,
-                group=group,
+                name=wb_name,
+                group=wb_group,
                 job_type=job_type,
-                tags=list(tags) if tags else [],
-                config=config,
-                dir=str(WANDB_DIR),
+                tags=wb_tags,
+                config=full_config,
+                dir=str(wandb_root_parent),
                 mode=mode,
-                reinit=True,
+                reinit="finish_previous",
             )
 
     def log_metrics(self, metrics: Dict[str, Any], step: Optional[int] = None) -> None:
@@ -87,7 +122,7 @@ class ExperimentTracker:
             json.dump([{"sequence": s, **m} for s, m in top_items], f, indent=2)
 
         if self.enabled and self.run is not None and top_items:
-            cols = ["rank", "sequence", "length", "pass_all", "disorder", "esm2_ppl"]
+            cols = ["rank", "sequence", "length", "pass_all", "disorder", "kappa_cider", "esm2_ppl"]
             rows: List[List[Any]] = []
             for r_idx, (seq, m) in enumerate(top_items):
                 rows.append([
@@ -96,6 +131,7 @@ class ExperimentTracker:
                     len(seq),
                     bool(m.get("pass_all", False)),
                     float(m.get("disorder", -1.0)),
+                    float(m.get("kappa_cider", -1.0)),
                     float(m.get("esm2_ppl", -1.0)),
                 ])
             wandb.log({"candidates/top_sequences": wandb.Table(columns=cols, data=rows)})
